@@ -1,80 +1,78 @@
 /**
  * @file CommandInterface.h
  * @brief Enhanced serial command interface
- * @version 3.0
+ * @version 2.0
  */
 
 #pragma once
 
 #include <Arduino.h>
 #include "config.h"
-#include "EMGProcessor.h"
-#include "Finger.h"
-#include "GraspManager.h"
-#include "ReflexEngine.h"
-#include "SensorFusion.h"
-#include "Calibration.h"
 
-/**
- * @class CommandInterface
- * @brief Provides serial command parsing and system control
- * 
- * V3 Enhancements:
- * - Advanced debugging and monitoring commands
- * - Motion profile control
- * - Reflex testing and statistics
- * - Enhanced EMG data visualization
- */
+// Forward declarations
+class EMGProcessor;
+class Finger;
+class GraspManager;
+class ReflexEngine;
+class SensorFusion;
+class PowerMonitor;
+
 class CommandInterface {
 public:
     CommandInterface();
     
     /**
-     * @brief Initialize with system component pointers
+     * @brief Initialize with system components
      */
-    void begin(EMGProcessor* emgProcessor, Finger** fingers, 
-              GraspManager* graspManager, ReflexEngine* reflexEngine = nullptr, 
-              SensorFusion* sensorFusion = nullptr, Calibration* calibration = nullptr);
+    void begin(
+        EMGProcessor* emgProcessor,
+        Finger** fingers,
+        uint8_t numFingers,
+        GraspManager* graspManager = nullptr,
+        ReflexEngine* reflexEngine = nullptr,
+        SensorFusion* sensorFusion = nullptr,
+        PowerMonitor* powerMonitor = nullptr
+    );
     
     /**
-     * @brief Process serial input
+     * @brief Process incoming serial data
      */
-    void processSerial();
+    void update();
     
     /**
      * @brief Process a specific command
+     * @param cmd Command string to process
+     * @return True if command was recognized and processed
      */
-    bool processCommand(const String& command);
+    bool processCommand(const char* cmd);
     
     /**
      * @brief Print help information
      */
     void printHelp();
-    
+
 private:
-    // System components
     EMGProcessor* _emgProcessor;
     Finger** _fingers;
+    uint8_t _numFingers;
     GraspManager* _graspManager;
     ReflexEngine* _reflexEngine;
     SensorFusion* _sensorFusion;
-    Calibration* _calibration;
+    PowerMonitor* _powerMonitor;
     
     // Command buffer
-    String _commandBuffer;
+    static constexpr uint8_t CMD_BUF_LEN = 64;
+    char _cmdBuffer[CMD_BUF_LEN];
+    uint8_t _cmdIndex;
     
-    // V3: Enhanced command processing
-    void handleGripCommand(const String& params);
-    void handleFingerCommand(const String& params);
-    void handleEMGCommand(const String& params);
-    void handleProfileCommand(const String& params);
-    void handleCalibrationCommand(const String& params);
-    void handleReflexCommand(const String& params);
-    void handleSensorCommand(const String& params);
-    void handleSystemCommand(const String& params);
-    void handleDebugCommand(const String& params);
-    
-    // V3: EMG visualization
-    void printEMGVisual();
-    void printEMGStats();
+    // Command handlers
+    void cmdHelp();
+    void cmdStatus();
+    void cmdEmgFeatures();
+    void cmdReflex(int fingerIdx);
+    void cmdGraspProfile(const char* profile);
+    void cmdPowerStatus();
+    void cmdMotionProfile(const char* profile);
+    void cmdSoftContact(bool enable);
+    void cmdSlipThreshold(float threshold);
 };

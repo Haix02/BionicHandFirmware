@@ -1,264 +1,94 @@
 /**
  * @file Finger.cpp
- * @brief Enhanced finger actuator implementation
- * @version 3.0
+ * @brief Enhanced finger control implementation
+ * @version 2.0
  */
 
 #include "Finger.h"
-#include <PID_v1.h> // PID Library for Teensy
 
-Finger::Finger(uint8_t pwmPin, uint8_t fsrPin)
-    : _pwmPin(pwmPin), _fsrPin(fsrPin), _offset(0), _currentPosition(0),
-      _targetPosition(0), _pidErrorInt(0.0f), _pidLastError(0.0f),
-      _pidKp(FINGER_PID_KP), _pidKi(FINGER_PID_KI), _pidKd(FINGER_PID_KD),
-      _fsrVal(0), _fsrHistIdx(0), _fsrDFdt(0), _slipDetected(false),
-      _profileType(MotionProfileType::None), 
-      _maxVelocity(400.0), _maxAcceleration(800.0),
-      _profileStartTime(0), _profileStartPos(0), _motionProfileActive(false),
-      _softContactEnabled(true), _softContactThreshold(0.3), _currentVelocity(0),
-      _state(FingerState::Idle)
+Finger::Finger(uint8_t servoPin, uint8_t fsrPin)
+    : _servoPin(servoPin), _fsrPin(fsrPin),
+      _targetPosition(0), _currentPosition(0), _offset(0),
+      _fsrValue(0.0f), _fsrDerivative(0.0f), _prevFSRValue(0.0f), _slipDetected(false),
+      _motionProfile(MotionProfileType::NONE),
+      _softContactEnabled(false), _softContactThreshold(0.5f),
+      _moveStartTime(0), _moveStartPosition(0), _moveDuration(0),
+      _pidKp(2.0f), _pidKi(0.1f), _pidKd(0.05f),
+      _pidIntegral(0.0f), _pidLastError(0.0f)
 {
-    memset(_fsrHist, 0, sizeof(_fsrHist));
-    
-    // Initialize PID controller
-    _pidController = new PID(&_currentPosition, &_currentVelocity, &_targetPosition, 
-                            _pidKp, _pidKi, _pidKd, DIRECT);
 }
 
 void Finger::begin() {
-    pinMode(_pwmPin, OUTPUT);
+    pinMode(_servoPin, OUTPUT);
     pinMode(_fsrPin, INPUT);
     
-    // Configure PID controller
-    _pidController->SetMode(AUTOMATIC);
-    _pidController->SetOutputLimits(-_maxVelocity, _maxVelocity);
-    _pidController->SetSampleTime(10); // 10ms update rate
-    
-    // Initialize finger position
-    actuate(_currentPosition);
+    // Initialize servo at current position
+    writePosition(_currentPosition);
 }
 
-void Finger::update(float dt_ms) {
-    // V3: Enhanced update with motion profiling and soft contact
-    float dt_sec = dt_ms / 1000.0f;
+void Finger::update(float dt) {
+    // Read FSR
+    _fsrValue = analogRead(_fsrPin) / 1023.0f;
     
-    if (_motionProfileActive) {
-        // Calculate elapsed time since motion started
-        float elapsedTime = (millis() - _profileStartTime) / 1000.0f;
-        
-        // Calculate new position based on profile type
-        uint16_t newPos = _currentPosition;
-        
-        switch (_profileType) {
-            case MotionProfileType::Trapezoidal:
-                newPos = calculateTrapezoidal(elapsedTime, _profileStartPos, 
-                                            _targetPosition, _maxVelocity, _maxAcceleration);
-                break;
-                
-            case MotionProfileType::SCurve:
-                newPos = calculateSCurve(elapsedTime, _profileStartPos, 
-                                       _targetPosition, _maxVelocity, _maxAcceleration);
-                break;
-                
-            default:
-                // Direct positioning (legacy behavior)
-                float error = _targetPosition - _currentPosition;
-                float command = _pidKp * error + _pidKi * _pidErrorInt + _pidKd * (_pidLastError - error) / dt_ms;
-                _pidLastError = error;
-                _pidErrorInt += error * dt_sec;
-                
-                // Apply position update
-                newPos = _currentPosition + command * dt_sec;
-                break;
-        }
-        
-        // Soft contact adaptation - slow down when approaching contact
-        if (_softContactEnabled && _fsrVal > _softContactThreshold) {
-            // Calculate velocity scaling based on force
-            float velocityScale = calculateVelocityScale();
-            
-            // Apply velocity scaling
-            float delta = newPos - _currentPosition;
-            newPos = _currentPosition + delta * velocityScale;
-            
-            // If stable contact reached, stop motion profile
-            if (_fsrVal > 0.7f) {
-                _motionProfileActive = false;
-                setState(FingerState::Gripping);
-            }
-        }
-        
-        // Update position
-        _currentPosition = constrain(newPos, FINGER_POS_MIN, FINGER_POS_MAX);
-        
-        // Check if motion profile is complete
-        if (abs(_currentPosition - _targetPosition) < 2) {
-            _motionProfileActive = false;
-            setState(FingerState::Idle);
-        }
-    }
-    else {
-        // If no active profile, use PID for position maintenance
-        _pidController->Compute();
-        _currentPosition += _currentVelocity * dt_sec;
-        _currentPosition = constrain(_currentPosition, FINGER_POS_MIN, FINGER_POS_MAX);
-    }
+    // Calculate FSR derivative for internal slip detection
+    _fsrDerivative = (_fsrValue - _prevFSRValue) / dt;
+    _prevFSRValue = _fsrValue;
     
-    // Apply position offset and send to actuator
-    uint16_t actuatorPos = _currentPosition + _offset;
-    actuate(actuatorPos);
-}
-
-float Finger::calculateTrapezoidal(float t, float startPos, float endPos, float maxVel, float maxAccel) {
-    float dist = endPos - startPos;
-    float dir = dist > 0 ? 1.0f : -1.0f;
-    dist = abs(dist);
+    // Update slip detection state
+    _slipDetected = (_fsrDerivative < -0.2f && _fsrValue > 0.1f);
     
-    // Time to reach maximum velocity
-    float t_accel = maxVel / maxAccel;
-    
-    // Distance covered during acceleration/deceleration
-    float d_accel = 0.5f * maxAccel * t_accel * t_accel;
-    
-    // Check if we can reach maximum velocity
-    if (2 * d_accel < dist) {
-        // Trapezoidal profile (accel, cruise, decel)
-        float t_cruise = (dist - 2 * d_accel) / maxVel;
-        float t_total = 2 * t_accel + t_cruise;
+    // Motion control based on selected profile
+    if (_motionProfile == MotionProfileType::NONE) {
+        // Simple PID position control
+        updatePID(dt);
+    } else {
+        // Use motion profile
+        float elapsed = (millis() - _moveStartTime) / 1000.0f; // Seconds
+        float progress;
         
-        if (t < t_accel) {
-            // Acceleration phase
-            return startPos + dir * 0.5f * maxAccel * t * t;
-        }
-        else if (t < t_accel + t_cruise) {
-            // Cruise phase
-            return startPos + dir * (d_accel + maxVel * (t - t_accel));
-        }
-        else if (t < t_total) {
-            // Deceleration phase
-            float t_decel = t - (t_accel + t_cruise);
-            return startPos + dir * (dist - 0.5f * maxAccel * (t_total - t) * (t_total - t));
-        }
-        else {
+        if (elapsed >= _moveDuration) {
             // Motion complete
-            return endPos;
-        }
-    }
-    else {
-        // Triangular profile (no cruise phase)
-        // Recalculate maximum velocity
-        maxVel = sqrt(maxAccel * dist);
-        t_accel = maxVel / maxAccel;
-        float t_total = 2 * t_accel;
-        
-        if (t < t_accel) {
-            // Acceleration phase
-            return startPos + dir * 0.5f * maxAccel * t * t;
-        }
-        else if (t < t_total) {
-            // Deceleration phase
-            return startPos + dir * (dist - 0.5f * maxAccel * (t_total - t) * (t_total - t));
-        }
-        else {
-            // Motion complete
-            return endPos;
-        }
-    }
-}
-
-float Finger::calculateSCurve(float t, float startPos, float endPos, float maxVel, float maxAccel) {
-    float dist = endPos - startPos;
-    float dir = dist > 0 ? 1.0f : -1.0f;
-    dist = abs(dist);
-    
-    // For S-curve, we need jerk limiting
-    // Simplified S-curve implementation
-    float jerk = maxAccel * 2.0f; // Jerk parameter
-    float t_jerk = maxAccel / jerk;
-    float t_accel = maxVel / maxAccel + t_jerk;
-    
-    // Calculate total distance and time
-    float d_accel = maxVel * t_accel - 0.5f * maxVel * t_jerk;
-    
-    if (2 * d_accel < dist) {
-        // S-curve with cruise phase
-        float t_cruise = (dist - 2 * d_accel) / maxVel;
-        float t_total = 2 * t_accel + t_cruise;
-        
-        if (t < t_jerk) {
-            // Initial jerk-limited acceleration
-            return startPos + dir * (jerk * t * t * t / 6.0f);
-        }
-        else if (t < t_accel - t_jerk) {
-            // Constant acceleration
-            return startPos + dir * (0.5f * maxAccel * (t - t_jerk/2) * (t - t_jerk/2) + jerk * t_jerk * t_jerk * t_jerk / 6.0f);
-        }
-        else if (t < t_accel) {
-            // Final jerk-limited acceleration
-            float t_phase = t - (t_accel - t_jerk);
-            return startPos + dir * (d_accel - maxVel * t_jerk / 2.0f + maxVel * t_phase - jerk * (t_jerk - t_phase) * (t_jerk - t_phase) * (t_jerk - t_phase) / 6.0f);
-        }
-        else if (t < t_accel + t_cruise) {
-            // Cruise phase
-            return startPos + dir * (d_accel + maxVel * (t - t_accel));
-        }
-        else if (t < t_total) {
-            // Deceleration (mirror of acceleration)
-            float t_decel = t - (t_accel + t_cruise);
-            float t_remaining = t_total - t;
+            _currentPosition = _targetPosition;
+        } else {
+            if (_motionProfile == MotionProfileType::TRAPEZOIDAL) {
+                progress = calculateTrapezoidal(elapsed, _moveDuration);
+            } else {
+                progress = calculateSCurve(elapsed, _moveDuration);
+            }
             
-            // Mirror acceleration calculations for deceleration
-            if (t_decel < t_jerk) {
-                // Initial jerk-limited deceleration
-                return endPos - dir * (jerk * t_decel * t_decel * t_decel / 6.0f);
-            }
-            else if (t_decel < t_accel - t_jerk) {
-                // Constant deceleration
-                return endPos - dir * (0.5f * maxAccel * (t_decel - t_jerk/2) * (t_decel - t_jerk/2) + jerk * t_jerk * t_jerk * t_jerk / 6.0f);
-            }
-            else {
-                // Final jerk-limited deceleration
-                float t_phase = t_decel - (t_accel - t_jerk);
-                return endPos - dir * (d_accel - maxVel * t_jerk / 2.0f + maxVel * t_phase - jerk * (t_jerk - t_phase) * (t_jerk - t_phase) * (t_jerk - t_phase) / 6.0f);
-            }
-        }
-        else {
-            // Motion complete
-            return endPos;
+            // Calculate new position based on progress
+            int32_t distance = _targetPosition - _moveStartPosition;
+            _currentPosition = _moveStartPosition + (distance * progress);
         }
     }
-    else {
-        // Simplified case for short movements
-        // Use a simpler curve for small movements
-        return startPos + dir * dist * (1 - cos(M_PI * t / (2 * t_accel))) / 2.0f;
-    }
-}
-
-float Finger::calculateVelocityScale() {
-    if (!_softContactEnabled || _fsrVal < _softContactThreshold) {
-        return 1.0f;
+    
+    // Apply soft contact behavior if enabled
+    if (_softContactEnabled) {
+        updateSoftContact(dt);
     }
     
-    // Scale velocity based on force feedback
-    float forceRange = 0.7f - _softContactThreshold;
-    float normalizedForce = (_fsrVal - _softContactThreshold) / forceRange;
-    normalizedForce = constrain(normalizedForce, 0.0f, 1.0f);
-    
-    // Exponential slowdown for natural soft landing
-    // 1.0 -> 0.2 as force increases
-    return 1.0f - 0.8f * normalizedForce;
+    // Apply output
+    writePosition(_currentPosition + _offset);
 }
 
 void Finger::setTarget(uint16_t position) {
-    _targetPosition = constrain(position, FINGER_POS_MIN, FINGER_POS_MAX);
-    setState(FingerState::Moving);
+    position = constrain(position, 0, 180); // Assume servo range 0-180
     
-    // V3: Initialize motion profile
-    if (_profileType != MotionProfileType::None) {
-        _profileStartTime = millis();
-        _profileStartPos = _currentPosition;
-        _motionProfileActive = true;
+    if (position == _targetPosition) {
+        return; // No change needed
     }
+    
+    // If using motion profiles, initialize movement
+    if (_motionProfile != MotionProfileType::NONE) {
+        _moveStartTime = millis();
+        _moveStartPosition = _currentPosition;
+        
+        // Calculate move duration based on distance
+        float distance = abs((int32_t)position - (int32_t)_currentPosition);
+        _moveDuration = max(0.5f, distance / 100.0f); // 0.5-1.8 seconds depending on distance
+    }
+    
+    _targetPosition = position;
 }
 
 uint16_t Finger::getTarget() const {
@@ -270,67 +100,35 @@ uint16_t Finger::getCurrentPosition() const {
 }
 
 float Finger::getFSR() const {
-    return _fsrVal;
-}
-
-void Finger::sampleFSR() {
-    // Called at 100Hz from ISR
-    _fsrVal = analogRead(_fsrPin) / 1024.0f;
-
-    // FSR slip detection history
-    _fsrHist[_fsrHistIdx] = _fsrVal;
-    _fsrHistIdx = (_fsrHistIdx + 1) % FSR_DERIV_WINDOW;
-
-    updateSlipDetection();
-}
-
-void Finger::updateSlipDetection() {
-    // Compute dF/dt over the history window
-    uint8_t oldest = (_fsrHistIdx + 1) % FSR_DERIV_WINDOW;
-    float df = _fsrVal - _fsrHist[oldest];
-    float dt = (float)FSR_DERIV_WINDOW * (1000.0f / FSR_SAMPLE_HZ); // ms
-    _fsrDFdt = df / (dt / 1000.0f); // per second
-
-    _slipDetected = (_fsrDFdt < FSR_SLIP_DFDT_THRESH);
-    if (_slipDetected)
-        _state = FingerState::Slipping;
+    return _fsrValue;
 }
 
 bool Finger::detectSlip() {
     return _slipDetected;
 }
 
-void Finger::reflexGrip() {
-    // V3: Enhanced reflex with direct motor control
-    // This bypasses motion profiling for immediate response
-    
-    // Calculate immediate increase in position
-    uint16_t reflexPos = _currentPosition + 10; // +10 units immediate increase
-    reflexPos = constrain(reflexPos, _currentPosition, FINGER_POS_MAX);
-    
-    // Directly actuate without motion profile
-    _currentPosition = reflexPos;
-    actuate(_currentPosition + _offset);
-    
-    // Update state
-    _state = FingerState::Gripping;
-    
-    // Reset slip detection
-    _slipDetected = false;
+void Finger::setOffset(int16_t offset) {
+    _offset = offset;
 }
 
-void Finger::setMotionProfile(MotionProfileType type) {
-    _profileType = type;
+void Finger::reflexGrip(float forceBoost) {
+    // Apply immediate force increase for reflex response
+    uint16_t currentForce = _currentPosition;
+    uint16_t maxForce = 180; // Maximum position (fully closed)
+    
+    // Calculate boost amount (percentage of remaining range)
+    uint16_t boostAmount = (maxForce - currentForce) * forceBoost;
+    
+    // Apply immediate position change - overrides any motion profile
+    _currentPosition = constrain(currentForce + boostAmount, 0, 180);
+    _targetPosition = _currentPosition;
+    
+    // Immediately write position to servo
+    writePosition(_currentPosition + _offset);
 }
 
-void Finger::setVelocityLimits(float maxVel, float maxAccel) {
-    _maxVelocity = maxVel;
-    _maxAcceleration = maxAccel;
-    
-    // Update PID controller limits
-    if (_pidController) {
-        _pidController->SetOutputLimits(-_maxVelocity, _maxVelocity);
-    }
+void Finger::setMotionProfile(MotionProfileType profile) {
+    _motionProfile = profile;
 }
 
 void Finger::enableSoftContact(bool enable) {
@@ -338,43 +136,100 @@ void Finger::enableSoftContact(bool enable) {
 }
 
 void Finger::setSoftContactThreshold(float threshold) {
-    _softContactThreshold = constrain(threshold, 0.1f, 0.8f);
+    _softContactThreshold = constrain(threshold, 0.1f, 0.9f);
 }
 
 void Finger::setPIDGains(float kp, float ki, float kd) {
     _pidKp = kp;
     _pidKi = ki;
     _pidKd = kd;
+    _pidIntegral = 0.0f; // Reset integral term
+}
+
+void Finger::writePosition(uint16_t position) {
+    // Ensure position is within valid range
+    position = constrain(position, 0, 180);
     
-    if (_pidController) {
-        _pidController->SetTunings(kp, ki, kd);
+    // Write to servo - implemention depends on your servo library
+    analogWrite(_servoPin, map(position, 0, 180, 0, 255));
+    // Or use Servo library with servo.write(position)
+}
+
+float Finger::calculateTrapezoidal(float t, float t_total) {
+    // Implement trapezoidal profile
+    // 25% accel, 50% constant velocity, 25% decel
+    
+    const float t_accel = t_total * 0.25f;
+    const float t_decel = t_total * 0.25f;
+    const float t_const = t_total - t_accel - t_decel;
+    
+    if (t < t_accel) {
+        // Acceleration phase
+        return 0.5f * (t / t_accel) * (t / t_accel);
+    } else if (t < (t_accel + t_const)) {
+        // Constant velocity phase
+        return 0.5f + (t - t_accel) / t_total;
+    } else if (t < t_total) {
+        // Deceleration phase
+        float td = (t - t_accel - t_const) / t_decel;
+        return 1.0f - 0.5f * (1.0f - td) * (1.0f - td);
+    } else {
+        // Past end of movement
+        return 1.0f;
     }
 }
 
-void Finger::setOffset(int16_t offset) {
-    _offset = offset;
+float Finger::calculateSCurve(float t, float t_total) {
+    // Implement S-curve velocity profile using sine functions
+    
+    if (t <= 0) return 0.0f;
+    if (t >= t_total) return 1.0f;
+    
+    // Use sinusoidal easing for smooth S-curve
+    return (1.0f - cos(t / t_total * PI)) / 2.0f;
 }
 
-FingerState Finger::getState() const {
-    return _state;
+void Finger::updateSoftContact(float dt) {
+    // Implement soft contact behavior
+    // Slow down movement when approaching contact threshold
+    
+    if (_fsrValue >= _softContactThreshold) {
+        // Calculate slow-down factor based on FSR pressure
+        float pressure_factor = map(_fsrValue, _softContactThreshold, 1.0f, 1.0f, 0.1f);
+        pressure_factor = constrain(pressure_factor, 0.1f, 1.0f);
+        
+        // If target is higher than current (closing), slow down movement
+        if (_targetPosition > _currentPosition) {
+            // Apply movement damping factor
+            int32_t diff = _targetPosition - _currentPosition;
+            uint16_t damped_diff = diff * pressure_factor * dt * 5.0f;
+            _currentPosition += damped_diff;
+        }
+    }
 }
 
-void Finger::setState(FingerState st) {
-    _state = st;
-}
-
-void Finger::actuate(uint16_t pwm_val) {
-    analogWrite(_pwmPin, pwm_val); // Adapt for actuator type
-}
-
-void Finger::printDebug(Stream &s) {
-    s.print(F("FSR:")); s.print(_fsrVal, 3); s.print(F(" dF/dt:")); s.print(_fsrDFdt, 3);
-    s.print(F(" Pos:")); s.print(_currentPosition);
-    s.print(F(" Target:")); s.print(_targetPosition);
-    s.print(F(" Profile:")); s.print((int)_profileType);
-    s.print(F(" State:")); s.print((int)_state);
-}
-
-void Finger::resetMotionProfile() {
-    _motionProfileActive = false;
+void Finger::updatePID(float dt) {
+    // Basic PID implementation
+    float error = _targetPosition - _currentPosition;
+    
+    // Proportional term
+    float p_term = _pidKp * error;
+    
+    // Integral term with anti-windup
+    _pidIntegral += error * dt;
+    _pidIntegral = constrain(_pidIntegral, -100.0f, 100.0f);
+    float i_term = _pidKi * _pidIntegral;
+    
+    // Derivative term
+    float error_rate = (error - _pidLastError) / dt;
+    float d_term = _pidKd * error_rate;
+    _pidLastError = error;
+    
+    // Calculate total command
+    float command = p_term + i_term + d_term;
+    
+    // Convert command to position change
+    int16_t position_change = command * dt * 10.0f;
+    _currentPosition += position_change;
+    _currentPosition = constrain(_currentPosition, 0, 180);
 }

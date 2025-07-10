@@ -1,37 +1,42 @@
 /**
  * @file ReflexEngine.cpp
- * @brief Implementation of the high-speed reflex detection system
- * @version 3.0
+ * @brief Implementation of high-speed reflex detection system
+ * @version 1.0
  */
 
 #include "ReflexEngine.h"
 
-// Static instance for ISR callback
+// Static instance pointer for ISR
 ReflexEngine* ReflexEngine::_instance = nullptr;
 
 ReflexEngine::ReflexEngine() 
-    : _fingers(nullptr), _enabled(false), 
-      _slipThreshold(FSR_SLIP_DFDT_THRESH),
-      _reflexCount(0), _totalResponseTime(0), 
-      _lastSlipDetectTime(0), _avgResponseTime(0.0f)
+    : _fingers(nullptr), 
+      _numFingers(0),
+      _enabled(false),
+      _slipThreshold(-0.2f),
+      _forceBoost(0.3f),
+      _reflexCount(0),
+      _totalResponseTime(0),
+      _avgResponseTime(0.0f),
+      _lastSlipDetectTime(0)
 {
-    _instance = this; // Set singleton instance for ISR
+    _instance = this;
     
-    // Initialize FSR history
-    for (uint8_t i = 0; i < NUM_FINGERS; i++) {
+    // Initialize FSR history arrays
+    for (uint8_t i = 0; i < MAX_FINGERS; i++) {
         _fsrHistoryIdx[i] = 0;
-        for (uint8_t j = 0; j < FSR_DERIV_WINDOW; j++) {
+        for (uint8_t j = 0; j < FSR_HISTORY_LEN; j++) {
             _fsrHistory[i][j] = 0.0f;
         }
     }
 }
 
-void ReflexEngine::begin(Finger** fingers) {
+void ReflexEngine::begin(Finger** fingers, uint8_t numFingers) {
     _fingers = fingers;
+    _numFingers = min(numFingers, (uint8_t)MAX_FINGERS);
     
-    // Initialize and start high-frequency timer for reflex detection
-    _reflexTimer.begin(reflexISR, 1000); // 1000us = 1ms = 1kHz
-    
+    // Start the high-frequency timer (1000 Hz = 1000 µs)
+    _reflexTimer.begin(_reflexISRWrapper, 1000);
     _enabled = true;
 }
 
@@ -41,64 +46,73 @@ void ReflexEngine::enable(bool enabled) {
 
 void ReflexEngine::setSlipThreshold(float threshold) {
     // Ensure threshold is negative (for slip detection)
-    _slipThreshold = threshold < 0 ? threshold : -threshold;
+    _slipThreshold = (threshold < 0) ? threshold : -threshold;
 }
 
-void ReflexEngine::getReflexStats(uint32_t* reflexCount, float* avgResponseTime) {
-    *reflexCount = _reflexCount;
-    *avgResponseTime = _avgResponseTime;
+void ReflexEngine::setForceBoost(float boost) {
+    _forceBoost = constrain(boost, 0.0f, 1.0f);
+}
+
+void ReflexEngine::getReflexStats(uint32_t* count, float* avgResponse) {
+    if (count) *count = _reflexCount;
+    if (avgResponse) *avgResponse = _avgResponseTime;
 }
 
 void ReflexEngine::update() {
-    // Update called from main loop
-    // Mainly for monitoring, actual reflex happens in ISR
+    // This method is called from main loop
+    // Nothing to do here as the main work happens in the ISR
+    // Could add debug output or other non-time-critical functions
 }
 
-void ReflexEngine::reflexISR() {
-    // Static ISR that calls instance method
+void ReflexEngine::_reflexISRWrapper() {
+    // Static method called by IntervalTimer
     if (_instance && _instance->_enabled) {
-        _instance->processFSRReadings();
+        _instance->reflexISR();
     }
 }
 
-void ReflexEngine::processFSRReadings() {
-    // High-speed FSR processing for slip detection
-    for (uint8_t i = 0; i < NUM_FINGERS; i++) {
-        // Read latest FSR value directly (bypass class interface for speed)
-        float fsrValue = analogRead(FSR_PINS[i]) / 1024.0f;
+void ReflexEngine::reflexISR() {
+    // This runs at 1kHz for rapid slip detection
+    for (uint8_t i = 0; i < _numFingers; i++) {
+        // Skip if finger doesn't exist
+        if (!_fingers[i]) continue;
         
-        // Store in history buffer
-        uint8_t idx = _fsrHistoryIdx[i];
-        _fsrHistory[i][idx] = fsrValue;
-        _fsrHistoryIdx[i] = (idx + 1) % FSR_DERIV_WINDOW;
+        // Get latest FSR reading
+        float fsrVal = _fingers[i]->getFSR();
+        
+        // Store in history buffer (circular)
+        _fsrHistory[i][_fsrHistoryIdx[i]] = fsrVal;
+        _fsrHistoryIdx[i] = (_fsrHistoryIdx[i] + 1) % FSR_HISTORY_LEN;
         
         // Check for slip
-        float slipRate = 0.0f;
-        if (detectSlip(i, &slipRate)) {
-            triggerReflex(i, slipRate);
+        if (detectSlip(i)) {
+            triggerReflex(i);
         }
     }
 }
 
 bool ReflexEngine::detectSlip(uint8_t fingerIdx, float* slipRate) {
-    // Calculate force derivative (dF/dt)
-    uint8_t currentIdx = _fsrHistoryIdx[fingerIdx];
-    uint8_t oldestIdx = (currentIdx + 1) % FSR_DERIV_WINDOW;
+    // Get newest and oldest FSR values
+    uint8_t newest = (_fsrHistoryIdx[fingerIdx] == 0) ? 
+                      FSR_HISTORY_LEN - 1 : _fsrHistoryIdx[fingerIdx] - 1;
+    uint8_t oldest = _fsrHistoryIdx[fingerIdx];
     
-    float currentForce = _fsrHistory[fingerIdx][currentIdx];
-    float oldestForce = _fsrHistory[fingerIdx][oldestIdx];
+    float newestVal = _fsrHistory[fingerIdx][newest];
+    float oldestVal = _fsrHistory[fingerIdx][oldest];
     
-    // Skip detection if force is too small (not gripping anything)
-    if (currentForce < 0.05f) {
+    // Skip detection if FSR value is too low (not gripping anything)
+    if (newestVal < 0.05f) {
         return false;
     }
     
     // Calculate rate of change (negative = slip)
-    float dt = FSR_DERIV_WINDOW * (1.0f / 1000.0f); // Time window in seconds
-    *slipRate = (currentForce - oldestForce) / dt;
+    float dt = FSR_HISTORY_LEN / 1000.0f; // Time window in seconds (1kHz sampling)
+    float rate = (newestVal - oldestVal) / dt;
+    
+    if (slipRate) *slipRate = rate;
     
     // Detect slip when force decreases rapidly
-    if (*slipRate < _slipThreshold) {
+    if (rate < _slipThreshold) {
         _lastSlipDetectTime = micros();
         return true;
     }
@@ -106,16 +120,21 @@ bool ReflexEngine::detectSlip(uint8_t fingerIdx, float* slipRate) {
     return false;
 }
 
-void ReflexEngine::triggerReflex(uint8_t fingerIdx, float slipRate) {
-    // Neuromorphic-inspired immediate reflex response
-    if (_fingers && _fingers[fingerIdx]) {
-        // Access finger object and trigger reflexive grip
-        _fingers[fingerIdx]->reflexGrip();
+void ReflexEngine::triggerReflex(uint8_t fingerIdx) {
+    if (_fingers[fingerIdx]) {
+        // Call the reflexGrip method on the finger
+        _fingers[fingerIdx]->reflexGrip(_forceBoost);
         
-        // Update reflex statistics
+        // Update statistics
         uint32_t responseTime = micros() - _lastSlipDetectTime;
         _reflexCount++;
         _totalResponseTime += responseTime;
-        _avgResponseTime = (float)_totalResponseTime / _reflexCount;
+        _avgResponseTime = (float)_totalResponseTime / (float)_reflexCount / 1000.0f; // Convert to ms
+    }
+}
+
+void ReflexEngine::triggerManualReflex(uint8_t fingerIdx) {
+    if (fingerIdx < _numFingers && _fingers[fingerIdx]) {
+        _fingers[fingerIdx]->reflexGrip(_forceBoost);
     }
 }
