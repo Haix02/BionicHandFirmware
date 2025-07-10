@@ -1,78 +1,98 @@
 /**
  * @file SensorFusion.cpp
- * @brief Enhanced sensor fusion implementation with IMU integration
+ * @brief Enhanced sensor fusion with IMU integration and slip detection
  * @version 2.0
  */
 
 #include "SensorFusion.h"
 
-SensorFusion::SensorFusion() 
+SensorFusion::SensorFusion()
     : _imuPresent(false),
-      _numFingers(0),
-      _numEmgChannels(0),
+      _fsrCount(0),
+      _emgCount(0),
       _slipRisk(0.0f),
-      _gripForceMultiplier(1.0f),
-      _activityContext(0),
-      _isMoving(false),
-      _movementMagnitude(0.0f),
+      _forceMultiplier(1.0f),
       _lastUpdateTime(0)
 {
     // Initialize arrays
+    memset(_fsrValues, 0, sizeof(_fsrValues));
+    memset(_fsrLastValues, 0, sizeof(_fsrLastValues));
+    memset(_fsrDerivatives, 0, sizeof(_fsrDerivatives));
+    memset(_fsrFiltered, 0, sizeof(_fsrFiltered));
+    
+    memset(_emgValues, 0, sizeof(_emgValues));
+    
     memset(_accel, 0, sizeof(_accel));
     memset(_gyro, 0, sizeof(_gyro));
     memset(_orientation, 0, sizeof(_orientation));
-    
-    memset(_fsrValues, 0, sizeof(_fsrValues));
-    memset(_prevFsrValues, 0, sizeof(_prevFsrValues));
-    memset(_fsrDerivatives, 0, sizeof(_fsrDerivatives));
-    
-    memset(_emgFeatures, 0, sizeof(_emgFeatures));
 }
 
 bool SensorFusion::begin() {
-    // Initialize I2C for IMU
+    // Initialize I2C communication
     Wire.begin();
     
-    // Initialize IMU if available
+    // Try to initialize MPU6050
     _imuPresent = initIMU();
+    
+    if (_imuPresent) {
+        Serial.println(F("IMU initialized successfully"));
+    } else {
+        Serial.println(F("IMU not detected"));
+    }
     
     return true;
 }
 
 bool SensorFusion::initIMU() {
-    #ifdef USE_MPU6050
-    // Initialize MPU6050
-    _mpu.initialize();
+    // Check if IMU is present on I2C bus
+    Wire.beginTransmission(MPU6050_ADDR);
+    bool devicePresent = (Wire.endTransmission() == 0);
     
-    // Test connection
-    if (!_mpu.testConnection()) {
+    if (!devicePresent) {
         return false;
     }
     
-    // Configure MPU6050
-    _mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);    // ±2g
-    _mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);    // ±250 deg/s
-    _mpu.setDLPFMode(MPU6050_DLPF_BW_20);              // 20 Hz low-pass filter
+    // Initialize MPU6050
+    // Wake up the device
+    Wire.beginTransmission(MPU6050_ADDR);
+    Wire.write(0x6B);  // PWR_MGMT_1 register
+    Wire.write(0);     // Set to zero to wake up
+    Wire.endTransmission(true);
+    
+    // Configure gyro range to ±250 deg/s
+    Wire.beginTransmission(MPU6050_ADDR);
+    Wire.write(0x1B);  // GYRO_CONFIG register
+    Wire.write(0);     // 0x00 = 250 deg/s
+    Wire.endTransmission(true);
+    
+    // Configure accel range to ±2g
+    Wire.beginTransmission(MPU6050_ADDR);
+    Wire.write(0x1C);  // ACCEL_CONFIG register
+    Wire.write(0);     // 0x00 = 2g
+    Wire.endTransmission(true);
+    
+    // Configure digital low pass filter
+    Wire.beginTransmission(MPU6050_ADDR);
+    Wire.write(0x1A);  // CONFIG register
+    Wire.write(0x03);  // 0x03 = 44Hz DLPF
+    Wire.endTransmission(true);
     
     return true;
-    #else
-    return false;
-    #endif
 }
 
 void SensorFusion::update() {
-    uint32_t currentTime = millis();
-    float dt = (currentTime - _lastUpdateTime) / 1000.0f;
+    uint32_t now = millis();
+    float dt = (now - _lastUpdateTime) / 1000.0f; // seconds
     
     // Avoid division by zero on first call
-    if (_lastUpdateTime == 0) dt = 0.01f;
-    _lastUpdateTime = currentTime;
-    
-    // Update FSR derivatives
-    for (uint8_t i = 0; i < _numFingers; i++) {
-        _fsrDerivatives[i] = (_fsrValues[i] - _prevFsrValues[i]) / dt;
-        _prevFsrValues[i] = _fsrValues[i];
+    if (_lastUpdateTime == 0) {
+        dt = 0.01f; // 10ms default
     }
+    
+    _lastUpdateTime = now;
+    
+    // Update FSR derivatives for slip detection
+    updateFsrDerivatives(dt);
     
     // Update IMU data if available
     if (_imuPresent) {
@@ -80,80 +100,159 @@ void SensorFusion::update() {
         updateOrientation(dt);
     }
     
-    // Detect movement based on IMU
-    detectMovement();
-    
-    // Perform risk assessment based on sensor fusion
+    // Assess slip risk based on all sensor data
     assessSlipRisk();
     
-    // Determine activity context
-    determineActivityContext();
-    
-    // Calculate appropriate grip force
-    _gripForceMultiplier = calculateGripForceMultiplier();
+    // Calculate appropriate force multiplier
+    calculateForceMultiplier();
+}
+
+void SensorFusion::updateFsrDerivatives(float dt) {
+    // Calculate derivative and filter FSR values
+    for (uint8_t i = 0; i < _fsrCount; i++) {
+        // Calculate raw derivative (dF/dt)
+        _fsrDerivatives[i] = (_fsrValues[i] - _fsrLastValues[i]) / dt;
+        _fsrLastValues[i] = _fsrValues[i];
+        
+        // Apply exponential smoothing filter to FSR values
+        const float alpha = 0.3f; // Smoothing factor
+        _fsrFiltered[i] = alpha * _fsrValues[i] + (1.0f - alpha) * _fsrFiltered[i];
+    }
 }
 
 void SensorFusion::updateIMU() {
-    #ifdef USE_MPU6050
     if (!_imuPresent) return;
     
     // Read raw values from MPU6050
-    int16_t ax, ay, az;
-    int16_t gx, gy, gz;
-    _mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    Wire.beginTransmission(MPU6050_ADDR);
+    Wire.write(0x3B);  // Starting register (ACCEL_XOUT_H)
+    Wire.endTransmission(false);
+    Wire.requestFrom(MPU6050_ADDR, (uint8_t)14, (uint8_t)true); // Read 14 bytes
+    
+    // Combine high and low bytes
+    int16_t ax = (Wire.read() << 8) | Wire.read();
+    int16_t ay = (Wire.read() << 8) | Wire.read();
+    int16_t az = (Wire.read() << 8) | Wire.read();
+    int16_t temp = (Wire.read() << 8) | Wire.read(); // Temperature (unused)
+    int16_t gx = (Wire.read() << 8) | Wire.read();
+    int16_t gy = (Wire.read() << 8) | Wire.read();
+    int16_t gz = (Wire.read() << 8) | Wire.read();
     
     // Convert to physical units
-    // Accelerometer: ±2g range = 16384 units/g
-    _accel[0] = ax / 16384.0f;  // X acceleration in g
-    _accel[1] = ay / 16384.0f;  // Y acceleration in g
-    _accel[2] = az / 16384.0f;  // Z acceleration in g
+    // For ±2g range: 16384 LSB/g
+    _accel[0] = ax / 16384.0f;
+    _accel[1] = ay / 16384.0f;
+    _accel[2] = az / 16384.0f;
     
-    // Gyroscope: ±250 deg/s range = 131 units/(deg/s)
-    _gyro[0] = gx / 131.0f;     // X rotation in deg/s
-    _gyro[1] = gy / 131.0f;     // Y rotation in deg/s
-    _gyro[2] = gz / 131.0f;     // Z rotation in deg/s
-    #endif
+    // For ±250 deg/s range: 131 LSB/(deg/s)
+    _gyro[0] = gx / 131.0f;
+    _gyro[1] = gy / 131.0f;
+    _gyro[2] = gz / 131.0f;
 }
 
 void SensorFusion::updateOrientation(float dt) {
     if (!_imuPresent) return;
     
-    // Complementary filter for orientation estimation
-    // This is a simplified implementation - consider using a proper AHRS algorithm
-    // like Madgwick or Mahony for better results
-    
+    // Simple complementary filter for orientation
     // Calculate angles from accelerometer (gravity vector)
     float accelPitch = atan2(_accel[1], sqrt(_accel[0] * _accel[0] + _accel[2] * _accel[2])) * RAD_TO_DEG;
     float accelRoll = atan2(-_accel[0], _accel[2]) * RAD_TO_DEG;
     
     // Integrate gyro rates
-    _orientation[0] += _gyro[0] * dt;  // Roll
-    _orientation[1] += _gyro[1] * dt;  // Pitch
-    _orientation[2] += _gyro[2] * dt;  // Yaw (gyro only)
+    _orientation[0] += _gyro[0] * dt; // Roll
+    _orientation[1] += _gyro[1] * dt; // Pitch
+    _orientation[2] += _gyro[2] * dt; // Yaw (gyro only)
     
     // Apply complementary filter (fusion)
     const float alpha = 0.98f;
-    _orientation[0] = alpha * _orientation[0] + (1-alpha) * accelRoll;
-    _orientation[1] = alpha * _orientation[1] + (1-alpha) * accelPitch;
+    _orientation[0] = alpha * _orientation[0] + (1.0f - alpha) * accelRoll;
+    _orientation[1] = alpha * _orientation[1] + (1.0f - alpha) * accelPitch;
     
-    // Normalize yaw to 0-360 degrees
+    // Keep yaw in range [0, 360)
     while (_orientation[2] < 0) _orientation[2] += 360.0f;
     while (_orientation[2] >= 360.0f) _orientation[2] -= 360.0f;
 }
 
-void SensorFusion::setEMGFeatures(const float* emgFeatures, uint8_t numChannels) {
-    _numEmgChannels = min(numChannels, (uint8_t)MAX_EMG_CHANNELS);
+void SensorFusion::assessSlipRisk() {
+    float risk = 0.0f;
     
-    for (uint8_t i = 0; i < _numEmgChannels; i++) {
-        _emgFeatures[i] = emgFeatures[i];
+    // 1. Check for negative FSR derivatives (sign of slip)
+    float maxNegDerivative = 0.0f;
+    for (uint8_t i = 0; i < _fsrCount; i++) {
+        if (_fsrFiltered[i] > 0.05f && _fsrDerivatives[i] < 0) {
+            // Filter out noise by requiring some contact force
+            float negDeriv = -_fsrDerivatives[i];
+            if (negDeriv > maxNegDerivative) {
+                maxNegDerivative = negDeriv;
+            }
+        }
+    }
+    
+    // Convert to risk factor (0.0-0.5 range)
+    if (maxNegDerivative > 0) {
+        risk += constrain(maxNegDerivative * 2.0f, 0.0f, 0.5f);
+    }
+    
+    // 2. Check orientation if IMU is present
+    if (_imuPresent) {
+        // Higher risk when hand is tilted down (negative pitch)
+        if (_orientation[1] < -30.0f) {
+            float pitchRisk = map(_orientation[1], -30.0f, -90.0f, 0.0f, 0.5f);
+            pitchRisk = constrain(pitchRisk, 0.0f, 0.5f);
+            risk += pitchRisk;
+        }
+        
+        // Higher risk with extreme roll angle
+        float absRoll = abs(_orientation[0]);
+        if (absRoll > 45.0f) {
+            float rollRisk = map(absRoll, 45.0f, 90.0f, 0.0f, 0.3f);
+            rollRisk = constrain(rollRisk, 0.0f, 0.3f);
+            risk += rollRisk;
+        }
+    }
+    
+    // Constrain total risk to [0, 1] range
+    _slipRisk = constrain(risk, 0.0f, 1.0f);
+}
+
+void SensorFusion::calculateForceMultiplier() {
+    // Base multiplier is 1.0
+    float multiplier = 1.0f;
+    
+    // Increase force when slip risk is high
+    if (_slipRisk > 0.2f) {
+        multiplier += _slipRisk * 0.8f;
+    }
+    
+    // Adjust based on orientation if IMU present
+    if (_imuPresent) {
+        // Add force when palm is facing down (risk of dropping)
+        if (_orientation[1] < -30.0f) {
+            float pitchFactor = map(_orientation[1], -30.0f, -90.0f, 0.0f, 0.5f);
+            pitchFactor = constrain(pitchFactor, 0.0f, 0.5f);
+            multiplier += pitchFactor;
+        }
+    }
+    
+    // Constrain to reasonable range
+    _forceMultiplier = constrain(multiplier, 0.8f, 2.0f);
+}
+
+void SensorFusion::setFSRValues(const float* values, uint8_t count) {
+    count = min(count, MAX_FSR_COUNT);
+    _fsrCount = count;
+    
+    for (uint8_t i = 0; i < count; i++) {
+        _fsrValues[i] = values[i];
     }
 }
 
-void SensorFusion::setFSRValues(const float* fsrValues, uint8_t numFingers) {
-    _numFingers = min(numFingers, (uint8_t)MAX_FINGERS);
+void SensorFusion::setEMGValues(const float* values, uint8_t count) {
+    count = min(count, MAX_EMG_COUNT);
+    _emgCount = count;
     
-    for (uint8_t i = 0; i < _numFingers; i++) {
-        _fsrValues[i] = fsrValues[i];
+    for (uint8_t i = 0; i < count; i++) {
+        _emgValues[i] = values[i];
     }
 }
 
@@ -167,171 +266,21 @@ float SensorFusion::getSlipRisk() const {
     return _slipRisk;
 }
 
-float SensorFusion::getGripForceMultiplier() const {
-    return _gripForceMultiplier;
-}
-
-uint8_t SensorFusion::getActivityContext() const {
-    return _activityContext;
+float SensorFusion::getForceMultiplier() const {
+    return _forceMultiplier;
 }
 
 bool SensorFusion::hasIMU() const {
     return _imuPresent;
 }
 
-void SensorFusion::detectMovement() {
-    if (!_imuPresent) {
-        _isMoving = false;
-        _movementMagnitude = 0.0f;
-        return;
-    }
-    
-    // Calculate total acceleration magnitude
-    float accelMagnitude = sqrt(
-        _accel[0] * _accel[0] +
-        _accel[1] * _accel[1] +
-        _accel[2] * _accel[2]
-    );
-    
-    // Calculate deviation from gravity (1.0g)
-    float accelDeviation = abs(accelMagnitude - 1.0f);
-    
-    // Calculate angular velocity magnitude
-    float gyroMagnitude = sqrt(
-        _gyro[0] * _gyro[0] +
-        _gyro[1] * _gyro[1] +
-        _gyro[2] * _gyro[2]
-    );
-    
-    // Combine for overall movement magnitude
-    _movementMagnitude = accelDeviation * 3.0f + gyroMagnitude * 0.01f;
-    
-    // Detect movement with hysteresis
-    if (_movementMagnitude > 0.2f) {
-        _isMoving = true;
-    } else if (_movementMagnitude < 0.1f) {
-        _isMoving = false;
-    }
+float SensorFusion::getFsrDerivative(uint8_t index) const {
+    return (index < _fsrCount) ? _fsrDerivatives[index] : 0.0f;
 }
 
-void SensorFusion::assessSlipRisk() {
-    float risk = 0.0f;
+bool SensorFusion::detectSlip(uint8_t index, float threshold) const {
+    if (index >= _fsrCount) return false;
     
-    // 1. Check orientation (higher risk when palm faces down)
-    if (_imuPresent) {
-        // Pitch gives palm orientation relative to ground
-        float pitchRisk = 0.0f;
-        
-        // Higher risk when palm faces down (-90°)
-        if (_orientation[1] < -45.0f) {
-            pitchRisk = map(_orientation[1], -45.0f, -90.0f, 0.0f, 0.5f);
-        }
-        
-        // Higher risk with extreme roll angles (±90°)
-        float rollRisk = 0.0f;
-        if (abs(_orientation[0]) > 45.0f) {
-            rollRisk = map(abs(_orientation[0]), 45.0f, 90.0f, 0.0f, 0.3f);
-        }
-        
-        risk += max(pitchRisk, rollRisk);
-    }
-    
-    // 2. Check FSR derivatives (negative = slipping)
-    float maxNegativeDerivative = 0.0f;
-    for (uint8_t i = 0; i < _numFingers; i++) {
-        if (_fsrValues[i] > 0.1f && _fsrDerivatives[i] < 0) {
-            maxNegativeDerivative = min(maxNegativeDerivative, _fsrDerivatives[i]);
-        }
-    }
-    
-    if (maxNegativeDerivative < 0) {
-        // Convert negative derivative to risk factor (more negative = higher risk)
-        risk += min(-maxNegativeDerivative * 2.0f, 0.5f);
-    }
-    
-    // 3. Add risk from movement
-    if (_isMoving) {
-        risk += min(_movementMagnitude * 0.5f, 0.3f);
-    }
-    
-    // Clamp to 0-1 range
-    _slipRisk = constrain(risk, 0.0f, 1.0f);
-}
-
-void SensorFusion::determineActivityContext() {
-    // Default: idle
-    uint8_t context = 0;
-    
-    // Check if holding an object
-    bool isHolding = false;
-    uint8_t activeFingers = 0;
-    for (uint8_t i = 0; i < _numFingers; i++) {
-        if (_fsrValues[i] > 0.2f) {
-            activeFingers++;
-        }
-    }
-    
-    if (activeFingers >= 2) {
-        isHolding = true;
-        context = 1;  // Holding object
-    }
-    
-    // Check if moving
-    if (isHolding && _isMoving && _movementMagnitude > 0.3f) {
-        context = 2;  // Moving with object
-    }
-    
-    _activityContext = context;
-}
-
-float SensorFusion::calculateGripForceMultiplier() const {
-    // Base multiplier
-    float multiplier = 1.0f;
-    
-    // Adjust for slip risk
-    if (_slipRisk > 0.2f) {
-        multiplier += _slipRisk * 0.8f;  // Up to +0.8 (1.8x force)
-    }
-    
-    // Adjust for activity context
-    switch (_activityContext) {
-        case 0:  // Idle
-            multiplier *= 0.8f;  // Reduce force
-            break;
-        case 2:  // Moving with object
-            multiplier *= 1.2f;  // Increase force
-            break;
-        default:
-            break;
-    }
-    
-    // Low battery case (would be provided by PowerMonitor)
-    // if (batteryLow) multiplier = min(multiplier, 1.0f);
-    
-    // Clamp to reasonable range
-    return constrain(multiplier, 0.5f, 2.0f);
-}
-
-void SensorFusion::printStatus(Stream& stream) const {
-    stream.print(F("Activity: "));
-    switch (_activityContext) {
-        case 0: stream.print(F("Idle")); break;
-        case 1: stream.print(F("Holding")); break;
-        case 2: stream.print(F("Moving")); break;
-    }
-    
-    stream.print(F(" | Slip Risk: "));
-    stream.print(_slipRisk, 2);
-    
-    stream.print(F(" | Force Mult: "));
-    stream.print(_gripForceMultiplier, 2);
-    
-    if (_imuPresent) {
-        stream.print(F(" | Orient[R,P]: "));
-        stream.print(_orientation[0], 1); // Roll
-        stream.print(F(","));
-        stream.print(_orientation[1], 1); // Pitch
-    }
-    
-    stream.println();
+    // Negative derivative indicates slip
+    return (_fsrDerivatives[index] < threshold && _fsrValues[index] > 0.05f);
 }

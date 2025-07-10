@@ -1,68 +1,88 @@
 /**
  * @file EMGProcessor.h
- * @brief Enhanced EMG signal processing with real-time DSP features
+ * @brief Enhanced EMG signal processing with advanced feature extraction
+ * @version 2.0
  */
 
 #pragma once
 
 #include <Arduino.h>
 #include "config.h"
-#include <arm_math.h>
+#include <arm_math.h> // CMSIS-DSP
 
-#define FEATURE_VECTOR_SIZE 3 // RMS, ZC, SSC
+// Number of features extracted per channel
+#define FEATURES_PER_CHANNEL 4 // RMS, ZC, WL, SSC
 
 class EMGProcessor {
 public:
+    // Extended features structure for EMG analysis
+    struct ExtendedFeatures {
+        float rms;         // Root Mean Square
+        float zc;          // Zero Crossing count
+        float wl;          // Waveform Length
+        float ssc;         // Slope Sign Changes
+        bool isActive;     // Activity detection flag
+    };
+    
     EMGProcessor();
     
-    // Original public interface
+    // Original API (preserved for compatibility)
     void begin();
-    void sampleISR();   // Called from IntervalTimer
-    void update();      // Call in main loop
+    void sampleISR();      // Called from timer interrupt
+    void update();         // Called from main loop
     
     float getFeature(uint8_t ch) const;
-    void getFeatureVector(float *out) const;
+    void getFeatureVector(float* out) const;
     
     void setChannelOffset(uint8_t ch, float offset);
     void calibrateRest();
     
-    // New enhanced methods
-    void getExtendedFeatures(uint8_t ch, float* features, uint8_t numFeatures) const;
-    bool isActivityDetected(uint8_t ch) const;
+    // Enhanced API
+    const float* getAllFeatures() const;
+    void getExtendedFeatures(uint8_t ch, ExtendedFeatures* features) const;
+    bool isChannelActive(uint8_t ch) const;
     float getRMS(uint8_t ch) const;
-    float getZeroCrossings(uint8_t ch) const;
-    float getSlopeSignChanges(uint8_t ch) const;
 
 private:
-    struct EMGChannelState {
-        float raw;          // Most recent raw sample
-        float filtered;     // Filtered sample
-        float rectified;    // Rectified sample
-        float movavg_sum;   // For moving average calculation
-        float movavg_buf[EMG_MOVAVG_WINDOW];  // Moving average buffer
-        uint16_t movavg_idx;     // Current index in movavg buffer
-        float raw_history[EMG_MOVAVG_WINDOW]; // Raw signal history
-        float offset;       // Baseline offset
-        float norm;         // Normalized output (0.0-1.0)
-        float rms;          // Root mean square
-        uint16_t zero_crossings;  // Zero crossing count
-        uint16_t slope_sign_changes; // Slope sign change count
-        bool activity_detected;  // Activity detection flag
-        float feature_vector[FEATURE_VECTOR_SIZE]; // Extended feature vector
+    // Channel state structure
+    struct ChannelState {
+        float raw;             // Raw ADC value
+        float filtered;        // Bandpass filtered signal
+        float rectified;       // Full-wave rectified signal
+        float rms;             // Root Mean Square value
+        float offset;          // DC offset/baseline
+        float norm;            // Normalized output (0.0-1.0)
+        
+        // Circular buffer for sliding window
+        float buffer[EMG_BUFFER_SIZE];
+        float windowSum;       // Sum of values in buffer
+        uint16_t bufferIndex;  // Current position in buffer
+        
+        // Raw signal history for feature extraction
+        float history[EMG_BUFFER_SIZE];
+        
+        // Advanced features
+        float zc;              // Zero Crossing count
+        float wl;              // Waveform Length
+        float ssc;             // Slope Sign Changes
+        bool active;           // Activity detection flag
     };
     
-    EMGChannelState channels[NUM_EMG_CHANNELS];
+    // Channel states
+    ChannelState _channels[NUM_EMG_CHANNELS];
     
-    // DSP components
-    arm_biquad_casd_df1_inst_f32 bandpassFilters[NUM_EMG_CHANNELS];
-    float filterCoeffs[5*NUM_EMG_CHANNELS]; // 5 coefficients per filter
-    float filterStates[4*NUM_EMG_CHANNELS]; // 4 state variables per filter
+    // Feature vector for external access
+    // Format: [ch0_rms, ch0_zc, ch0_wl, ch0_ssc, ch1_rms, ch1_zc, ...]
+    float _featureVector[NUM_EMG_CHANNELS * FEATURES_PER_CHANNEL];
+    
+    // CMSIS-DSP filter instances
+    arm_biquad_casd_df1_inst_f32 _filters[NUM_EMG_CHANNELS];
+    float _filterCoeffs[5 * NUM_EMG_CHANNELS]; // 5 coefficients per filter
+    float _filterStates[4 * NUM_EMG_CHANNELS]; // 4 state variables per filter
     
     // Private methods
     void configureFilters();
-    void applyDSP(uint8_t ch, float raw);
+    void processSample(uint8_t ch, float sample);
     void updateFeatures(uint8_t ch);
-    void updateMovingAverage(uint8_t ch, float val);
-    void normalizeAndThreshold(uint8_t ch);
-    void detectActivity(uint8_t ch);
+    void normalizeSignal(uint8_t ch);
 };

@@ -1,7 +1,7 @@
 /**
  * @file GraspManager.h
- * @brief Enhanced grasp coordination with biomimetic grasp synergies
- * @version 3.0
+ * @brief Coordinates multi-finger grasp patterns
+ * @version 2.0
  */
 
 #pragma once
@@ -10,83 +10,67 @@
 #include "config.h"
 #include "Finger.h"
 
-/**
- * @enum GraspType
- * @brief Supported grasp types.
- */
-enum class GraspType : uint8_t {
-    Open,       ///< Open hand
-    Close,      ///< Close hand
-    Power,      ///< Power grip (cylindrical objects)
-    Spherical,  ///< Spherical grip (round objects)
-    Pinch,      ///< Precision pinch (small objects)
-    Hook,       ///< Hook grip (carrying)
-    Lateral,    ///< Key/lateral grip
-    Custom      ///< Custom grip pattern
-};
-
-/**
- * @class GraspManager
- * @brief Multi-finger coordination and gesture/grip logic.
- * 
- * V3 Enhancements:
- * - Biomimetic grip synergies
- * - Context-aware grip adaptation
- * - Variable grip force based on sensor fusion
- */
 class GraspManager {
 public:
-    GraspManager(Finger* fingers[NUM_FINGERS]);
-
-    // Core functionality
-    void setGraspType(GraspType grasp);
-    GraspType getGraspType() const;
+    GraspManager();
     
-    // V3: Enhanced update with context-aware force control
-    void update(const float emgFeature[NUM_EMG_CHANNELS], float forceScale = 1.0f);
+    /**
+     * @brief Initialize with array of finger pointers
+     */
+    void begin(Finger** fingers, uint8_t numFingers);
     
-    // Debug information
-    void printDebug(Stream &s);
-
-    // Custom grip mapping
-    void setCustomGrip(uint16_t target[NUM_FINGERS]);
+    /**
+     * @brief Update grasp behavior (call periodically)
+     */
+    void update();
     
-    // V3: Grip force control
-    void setGripForce(float force); // 0.0-1.0 scale
-    float getGripForce() const;
+    /**
+     * @brief Execute a specific grasp pattern
+     * @param mode Grasp mode ("power", "precision", "spherical", etc.)
+     */
+    void executeGrasp(String mode);
     
-    // V3: Finger cascade timing control
-    void enableNaturalTiming(bool enable);
+    /**
+     * @brief Set grip force for all grasps
+     * @param force Force level from 0.0 (min) to 1.0 (max)
+     */
+    void setGraspForce(float force);
     
-    // V3: Grip transition speed
-    void setGripTransitionSpeed(float speed); // 0.0-1.0 scale
+    /**
+     * @brief Get current grip force
+     * @return Force level from 0.0 to 1.0
+     */
+    float getGraspForce() const;
+    
+    /**
+     * @brief Get current grasp mode
+     * @return String indicating current grasp mode
+     */
+    String getCurrentGraspMode() const;
+    
+    /**
+     * @brief Set transition speed for grasp changes
+     * @param speed Speed factor from 0.1 (slow) to 1.0 (fast)
+     */
+    void setTransitionSpeed(float speed);
 
 private:
-    Finger* _fingers[NUM_FINGERS];
-    GraspType _currentGrasp;
-    uint16_t _customGrip[NUM_FINGERS];
+    Finger** _fingers;     // Array of finger pointers
+    uint8_t _numFingers;   // Number of fingers in array
     
-    // V3: Enhanced grip control
-    float _gripForce;           ///< Overall grip force (0.0-1.0)
-    bool _naturalTiming;        ///< Enable natural finger cascade
-    float _transitionSpeed;     ///< Speed of grip transitions
-    uint32_t _gripChangeTime;   ///< Time when grip was last changed
+    String _currentGraspMode; // Current active grasp mode
+    float _graspForce;     // Force level for grasps
+    float _transitionSpeed; // Speed factor for transitions
     
-    // Finger timing delays for natural cascade (in ms)
-    uint8_t _fingerDelays[NUM_FINGERS];
-    
-    // Grip implementation methods
-    void executeGrasp(float forceScale);
-    void openHand();
-    void closeHand();
-    void powerGrip();
-    void sphericalGrip();
-    void pinchGrip();
-    void hookGrip();
-    void lateralGrip();
-    void customGrip();
-    
-    // V3: Helper methods
-    void calculateFingerDelays();
-    float calculateFingerForce(uint8_t fingerIdx, float baseForce);
+    // Grasp pattern implementations
+    void executeOpenHand();
+    void executeCloseHand();
+    void executePowerGrasp();
+    void executePrecisionGrasp();
+    void executeSphericalGrasp();
+    void executeTripodGrasp();
+    void executeLateralGrasp();
+    void executeHookGrasp();
+    void executePointGesture();
+    void executeThumbsUpGesture();
 };

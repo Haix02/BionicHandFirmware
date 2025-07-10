@@ -1,257 +1,294 @@
 /**
  * @file EMGProcessor.cpp
- * @brief Enhanced EMG signal processing with real-time DSP features
+ * @brief Enhanced EMG signal processing with advanced feature extraction
+ * @version 2.0
  */
 
 #include "EMGProcessor.h"
-#include <arm_math.h>  // CMSIS DSP library for Teensy 4.1
+#include <arm_math.h> // CMSIS-DSP library
 
-// Constructor remains unchanged
+// Constructor implementation - initialize member variables
 EMGProcessor::EMGProcessor() {
-    // Initialize state variables
-    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ++ch) {
-        channels[ch].offset = 0.0f;
-        channels[ch].rms = 0.0f;
-        channels[ch].zero_crossings = 0;
-        channels[ch].slope_sign_changes = 0;
-        channels[ch].activity_detected = false;
-        channels[ch].movavg_idx = 0;
-        channels[ch].movavg_sum = 0.0f;
-        memset(channels[ch].movavg_buf, 0, sizeof(channels[ch].movavg_buf));
-        memset(channels[ch].raw_history, 0, sizeof(channels[ch].raw_history));
+    // Initialize all channels
+    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ch++) {
+        _channels[ch].raw = 0.0f;
+        _channels[ch].filtered = 0.0f;
+        _channels[ch].rectified = 0.0f;
+        _channels[ch].rms = 0.0f;
+        _channels[ch].offset = 0.0f;
+        _channels[ch].norm = 0.0f;
+        _channels[ch].bufferIndex = 0;
+        _channels[ch].windowSum = 0.0f;
+        _channels[ch].zc = 0.0f;
+        _channels[ch].wl = 0.0f;
+        _channels[ch].ssc = 0.0f;
+        _channels[ch].active = false;
+        
+        // Initialize buffer and history
+        for (uint16_t i = 0; i < EMG_BUFFER_SIZE; i++) {
+            _channels[ch].buffer[i] = 0.0f;
+            _channels[ch].history[i] = 0.0f;
+        }
     }
     
-    // Initialize filter coefficients
+    // Configure DSP filters
     configureFilters();
 }
 
+void EMGProcessor::begin() {
+    // Set up analog pins for EMG input
+    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ch++) {
+        pinMode(EMG_PINS[ch], INPUT);
+    }
+    
+    // Calibrate baselines if needed
+    calibrateRest();
+}
+
 void EMGProcessor::configureFilters() {
-    // Configure bandpass filter (20-500Hz) using CMSIS-DSP
-    const float fs = EMG_SAMPLE_HZ;  // Sampling frequency
-    const float f_low = 20.0f;       // Lower cutoff
-    const float f_high = 500.0f;     // Upper cutoff
-    const float q = EMG_BANDPASS_Q;  // Q factor
+    // Configure bandpass filter (20-500Hz)
+    // Using CMSIS-DSP biquad filter
+    const float fs = EMG_SAMPLE_HZ;      // Sampling frequency (e.g., 1000Hz)
+    const float f_low = 20.0f;           // Lower cutoff frequency
+    const float f_high = 500.0f;         // Upper cutoff frequency
+    const float q = EMG_BANDPASS_Q;      // Q factor (typically 0.707)
     
     // Calculate normalized frequencies
-    const float w_low = 2.0f * M_PI * f_low / fs;
-    const float w_high = 2.0f * M_PI * f_high / fs;
+    const float w_low = 2.0f * PI * f_low / fs;
+    const float w_high = 2.0f * PI * f_high / fs;
     
     // Initialize filters for each channel
-    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ++ch) {
-        // Allocate filter coefficients for biquad filter
-        float* coeffs = &filterCoeffs[ch * 5];
+    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ch++) {
+        // Calculate biquad coefficients for bandpass
+        float* coeffs = _filterCoeffs + (ch * 5); // 5 coefficients per filter
         
-        // Calculate biquad bandpass coefficients
-        // This is a simplified implementation - can be optimized further
-        coeffs[0] = 0.1f;                    // b0
-        coeffs[1] = 0.0f;                    // b1
-        coeffs[2] = -0.1f;                   // b2
-        coeffs[3] = -1.98f * cos(w_low);     // -a1
-        coeffs[4] = 0.96f;                   // -a2
+        // Basic biquad bandpass coefficients (can be optimized further)
+        coeffs[0] = 0.1f;                 // b0
+        coeffs[1] = 0.0f;                 // b1
+        coeffs[2] = -0.1f;                // b2
+        coeffs[3] = -1.8f * cos(w_low);   // -a1
+        coeffs[4] = 0.8f;                 // -a2
         
         // Initialize filter structure
         arm_biquad_cascade_df1_init_f32(
-            &bandpassFilters[ch],
-            1,                    // 1-stage filter
-            coeffs,               // Filter coefficients
-            &filterStates[ch*4]   // State variables (4 per biquad stage)
+            &_filters[ch],            // Filter instance
+            1,                        // 1-stage biquad
+            coeffs,                   // Filter coefficients
+            _filterStates + (ch * 4)  // Filter state variables (4 per filter)
         );
     }
 }
 
-void EMGProcessor::begin() {
-    // Set up ADC pins
-    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ++ch) {
-        pinMode(EMG_PINS[ch], INPUT);
-    }
-}
-
 void EMGProcessor::sampleISR() {
-    // Called at EMG_SAMPLE_HZ frequency (e.g., 1000 Hz)
-    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ++ch) {
-        // Read raw EMG sample
+    // Called from timer interrupt at EMG_SAMPLE_HZ rate
+    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ch++) {
+        // Read raw ADC value
         float raw = analogRead(EMG_PINS[ch]);
         
-        // Store raw sample in history buffer
-        channels[ch].raw_history[channels[ch].movavg_idx] = raw;
+        // Store raw value in channel state and history buffer
+        _channels[ch].raw = raw;
+        _channels[ch].history[_channels[ch].bufferIndex] = raw;
         
         // Apply DSP pipeline
-        applyDSP(ch, raw);
+        processSample(ch, raw);
     }
 }
 
-void EMGProcessor::applyDSP(uint8_t ch, float raw) {
+void EMGProcessor::processSample(uint8_t ch, float sample) {
     // 1. Apply bandpass filter (20-500 Hz)
     float filtered;
     arm_biquad_cascade_df1_f32(
-        &bandpassFilters[ch],
-        &raw,                // Input sample
-        &filtered,           // Output sample
-        1                    // Process 1 sample
+        &_filters[ch],
+        &sample,        // Input sample
+        &filtered,      // Output sample
+        1               // Number of samples
     );
-    
-    channels[ch].filtered = filtered;
+    _channels[ch].filtered = filtered;
     
     // 2. Apply full-wave rectification
     float rectified = fabs(filtered);
-    channels[ch].rectified = rectified;
+    _channels[ch].rectified = rectified;
     
-    // 3. Update moving average with rectified value
-    updateMovingAverage(ch, rectified);
+    // 3. Update sliding window buffer
+    uint16_t idx = _channels[ch].bufferIndex;
+    
+    // Remove oldest sample from sum
+    _channels[ch].windowSum -= _channels[ch].buffer[idx];
+    
+    // Add new sample to buffer and sum
+    _channels[ch].buffer[idx] = rectified;
+    _channels[ch].windowSum += rectified;
+    
+    // Update buffer index (circular buffer)
+    _channels[ch].bufferIndex = (idx + 1) % EMG_BUFFER_SIZE;
+    
+    // 4. Calculate RMS from window sum
+    _channels[ch].rms = sqrt(_channels[ch].windowSum / EMG_BUFFER_SIZE);
+    
+    // 5. Detect activity based on RMS threshold
+    _channels[ch].active = (_channels[ch].rms > EMG_THRESH);
+    
+    // 6. Calculate normalized output (threshold already applied)
+    normalizeSignal(ch);
 }
 
 void EMGProcessor::update() {
-    // Called from main loop to update features
-    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ++ch) {
-        // Calculate features
-        updateFeatures(ch);
-        
-        // Detect activity
-        detectActivity(ch);
-        
-        // Apply normalization and thresholding
-        normalizeAndThreshold(ch);
+    // Called from main loop at lower rate to extract features
+    // This separates the time-critical sampling from feature extraction
+    
+    static uint32_t lastFeatureUpdate = 0;
+    uint32_t now = millis();
+    
+    // Update features every 20ms (50Hz)
+    if (now - lastFeatureUpdate >= 20) {
+        for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ch++) {
+            updateFeatures(ch);
+        }
+        lastFeatureUpdate = now;
     }
 }
 
 void EMGProcessor::updateFeatures(uint8_t ch) {
-    // Calculate RMS over moving average window
-    float sum_squared = 0.0f;
-    for (uint16_t i = 0; i < EMG_MOVAVG_WINDOW; ++i) {
-        float sample = channels[ch].movavg_buf[i];
-        sum_squared += sample * sample;
-    }
-    channels[ch].rms = sqrt(sum_squared / EMG_MOVAVG_WINDOW);
+    // Calculate Zero Crossing (ZC)
+    // Number of times the signal crosses zero
+    uint16_t zc = 0;
+    float threshold = 0.015f; // Small threshold to avoid noise
     
-    // Calculate Zero Crossings (ZC)
-    uint16_t zc_count = 0;
-    float threshold = 0.01f; // Small threshold to avoid noise
-    
-    for (uint16_t i = 1; i < EMG_MOVAVG_WINDOW; ++i) {
-        uint16_t curr_idx = (channels[ch].movavg_idx + i) % EMG_MOVAVG_WINDOW;
-        uint16_t prev_idx = (channels[ch].movavg_idx + i - 1) % EMG_MOVAVG_WINDOW;
+    for (uint16_t i = 1; i < EMG_BUFFER_SIZE; i++) {
+        uint16_t curr_idx = (i + _channels[ch].bufferIndex) % EMG_BUFFER_SIZE;
+        uint16_t prev_idx = (i - 1 + _channels[ch].bufferIndex) % EMG_BUFFER_SIZE;
         
-        float curr = channels[ch].raw_history[curr_idx] - channels[ch].offset;
-        float prev = channels[ch].raw_history[prev_idx] - channels[ch].offset;
+        float prev = _channels[ch].history[prev_idx] - _channels[ch].offset;
+        float curr = _channels[ch].history[curr_idx] - _channels[ch].offset;
         
         if ((prev > threshold && curr < -threshold) || 
             (prev < -threshold && curr > threshold)) {
-            zc_count++;
+            zc++;
         }
     }
-    channels[ch].zero_crossings = zc_count;
+    _channels[ch].zc = (float)zc;
     
-    // Calculate Slope Sign Changes (SSC)
-    uint16_t ssc_count = 0;
-    
-    for (uint16_t i = 1; i < EMG_MOVAVG_WINDOW - 1; ++i) {
-        uint16_t prev_idx = (channels[ch].movavg_idx + i - 1) % EMG_MOVAVG_WINDOW;
-        uint16_t curr_idx = (channels[ch].movavg_idx + i) % EMG_MOVAVG_WINDOW;
-        uint16_t next_idx = (channels[ch].movavg_idx + i + 1) % EMG_MOVAVG_WINDOW;
+    // Calculate Waveform Length (WL)
+    // Sum of absolute differences between adjacent samples
+    float wl = 0.0f;
+    for (uint16_t i = 1; i < EMG_BUFFER_SIZE; i++) {
+        uint16_t curr_idx = (i + _channels[ch].bufferIndex) % EMG_BUFFER_SIZE;
+        uint16_t prev_idx = (i - 1 + _channels[ch].bufferIndex) % EMG_BUFFER_SIZE;
         
-        float prev = channels[ch].raw_history[prev_idx] - channels[ch].offset;
-        float curr = channels[ch].raw_history[curr_idx] - channels[ch].offset;
-        float next = channels[ch].raw_history[next_idx] - channels[ch].offset;
+        wl += fabs(_channels[ch].history[curr_idx] - _channels[ch].history[prev_idx]);
+    }
+    _channels[ch].wl = wl;
+    
+    // Calculate Slope Sign Change (SSC)
+    // Number of times slope changes sign
+    uint16_t ssc = 0;
+    for (uint16_t i = 1; i < EMG_BUFFER_SIZE - 1; i++) {
+        uint16_t prev_idx = (i - 1 + _channels[ch].bufferIndex) % EMG_BUFFER_SIZE;
+        uint16_t curr_idx = (i + _channels[ch].bufferIndex) % EMG_BUFFER_SIZE;
+        uint16_t next_idx = (i + 1 + _channels[ch].bufferIndex) % EMG_BUFFER_SIZE;
+        
+        float prev = _channels[ch].history[prev_idx];
+        float curr = _channels[ch].history[curr_idx];
+        float next = _channels[ch].history[next_idx];
         
         float slope1 = curr - prev;
         float slope2 = next - curr;
         
         if ((slope1 > threshold && slope2 < -threshold) || 
             (slope1 < -threshold && slope2 > threshold)) {
-            ssc_count++;
+            ssc++;
         }
     }
-    channels[ch].slope_sign_changes = ssc_count;
+    _channels[ch].ssc = (float)ssc;
     
-    // Store features in vector (for future pattern recognition)
-    channels[ch].feature_vector[0] = channels[ch].rms;
-    channels[ch].feature_vector[1] = channels[ch].zero_crossings / (float)EMG_MOVAVG_WINDOW;
-    channels[ch].feature_vector[2] = channels[ch].slope_sign_changes / (float)EMG_MOVAVG_WINDOW;
+    // Update feature vector for external access
+    _featureVector[ch * FEATURES_PER_CHANNEL + 0] = _channels[ch].rms;
+    _featureVector[ch * FEATURES_PER_CHANNEL + 1] = _channels[ch].zc / 100.0f;  // Normalize
+    _featureVector[ch * FEATURES_PER_CHANNEL + 2] = _channels[ch].wl / 1000.0f; // Normalize
+    _featureVector[ch * FEATURES_PER_CHANNEL + 3] = _channels[ch].ssc / 100.0f; // Normalize
 }
 
-void EMGProcessor::detectActivity(uint8_t ch) {
-    // Detect EMG activity based on RMS threshold
-    channels[ch].activity_detected = (channels[ch].rms > EMG_THRESH);
-}
-
-void EMGProcessor::updateMovingAverage(uint8_t ch, float val) {
-    // Remove oldest sample
-    channels[ch].movavg_sum -= channels[ch].movavg_buf[channels[ch].movavg_idx];
-    
-    // Add new sample
-    channels[ch].movavg_buf[channels[ch].movavg_idx] = val;
-    channels[ch].movavg_sum += val;
-    
-    // Update index
-    channels[ch].movavg_idx = (channels[ch].movavg_idx + 1) % EMG_MOVAVG_WINDOW;
-}
-
-void EMGProcessor::normalizeAndThreshold(uint8_t ch) {
-    // Calculate moving average
-    float ma = channels[ch].movavg_sum / EMG_MOVAVG_WINDOW;
-    
-    // Normalize and apply offset
-    float norm = (ma - channels[ch].offset) / EMG_NORM_MAX;
-    norm = constrain(norm, 0.0f, 1.0f);
+void EMGProcessor::normalizeSignal(uint8_t ch) {
+    // Calculate normalized output with offset removal and thresholding
+    float value = _channels[ch].rms;
+    value = (value - _channels[ch].offset) / EMG_NORM_MAX;
     
     // Apply threshold
-    if (norm < EMG_THRESH) {
-        norm = 0.0f;
+    if (value < EMG_THRESH) {
+        value = 0.0f;
     }
     
-    // Store normalized value
-    channels[ch].norm = norm;
+    // Clamp to range [0, 1]
+    value = constrain(value, 0.0f, 1.0f);
+    
+    _channels[ch].norm = value;
 }
 
 float EMGProcessor::getFeature(uint8_t ch) const {
-    // Return normalized amplitude (original API maintained)
-    return channels[ch].norm;
+    // Return normalized EMG amplitude (original API maintained)
+    return (ch < NUM_EMG_CHANNELS) ? _channels[ch].norm : 0.0f;
 }
 
-void EMGProcessor::getFeatureVector(float *out) const {
-    // Copy normalized values to output array
-    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ++ch) {
-        out[ch] = channels[ch].norm;
+void EMGProcessor::getFeatureVector(float* out) const {
+    // Copy normalized values to output array (original API maintained)
+    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ch++) {
+        out[ch] = _channels[ch].norm;
     }
 }
 
-void EMGProcessor::getExtendedFeatures(uint8_t ch, float* features, uint8_t numFeatures) const {
-    // Provide access to the extended feature vector
-    uint8_t count = min(numFeatures, FEATURE_VECTOR_SIZE);
-    for (uint8_t i = 0; i < count; ++i) {
-        features[i] = channels[ch].feature_vector[i];
-    }
+const float* EMGProcessor::getAllFeatures() const {
+    // Return pointer to the entire feature vector
+    return _featureVector;
+}
+
+void EMGProcessor::getExtendedFeatures(uint8_t ch, ExtendedFeatures* features) const {
+    if (ch >= NUM_EMG_CHANNELS || !features) return;
+    
+    features->rms = _channels[ch].rms;
+    features->zc = _channels[ch].zc;
+    features->wl = _channels[ch].wl;
+    features->ssc = _channels[ch].ssc;
+    features->isActive = _channels[ch].active;
 }
 
 void EMGProcessor::setChannelOffset(uint8_t ch, float offset) {
     if (ch < NUM_EMG_CHANNELS) {
-        channels[ch].offset = offset;
+        _channels[ch].offset = offset;
     }
 }
 
 void EMGProcessor::calibrateRest() {
-    // Calculate average of current signal as offset
-    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ++ch) {
-        float avg = 0.0f;
-        for (uint16_t i = 0; i < EMG_MOVAVG_WINDOW; ++i) {
-            avg += channels[ch].raw_history[i];
+    Serial.println(F("Calibrating EMG rest levels..."));
+    
+    // Take multiple samples to establish baseline
+    const uint16_t SAMPLES = 100;
+    
+    // For each channel, average the raw signal to establish offset
+    for (uint8_t ch = 0; ch < NUM_EMG_CHANNELS; ch++) {
+        float sum = 0.0f;
+        
+        // Collect samples
+        for (uint16_t i = 0; i < SAMPLES; i++) {
+            sum += analogRead(EMG_PINS[ch]);
+            delay(1); // Small delay between samples
         }
-        channels[ch].offset = avg / EMG_MOVAVG_WINDOW;
+        
+        // Set offset to average
+        _channels[ch].offset = sum / SAMPLES;
+        
+        Serial.print(F("Channel "));
+        Serial.print(ch);
+        Serial.print(F(" offset: "));
+        Serial.println(_channels[ch].offset);
     }
+    
+    Serial.println(F("Calibration complete"));
 }
 
-bool EMGProcessor::isActivityDetected(uint8_t ch) const {
-    return channels[ch].activity_detected;
+bool EMGProcessor::isChannelActive(uint8_t ch) const {
+    return (ch < NUM_EMG_CHANNELS) ? _channels[ch].active : false;
 }
 
 float EMGProcessor::getRMS(uint8_t ch) const {
-    return channels[ch].rms;
-}
-
-float EMGProcessor::getZeroCrossings(uint8_t ch) const {
-    return channels[ch].zero_crossings;
-}
-
-float EMGProcessor::getSlopeSignChanges(uint8_t ch) const {
-    return channels[ch].slope_sign_changes;
+    return (ch < NUM_EMG_CHANNELS) ? _channels[ch].rms : 0.0f;
 }
