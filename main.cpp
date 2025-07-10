@@ -1,98 +1,131 @@
 /**
  * @file main.cpp
- * @brief Main program with ReflexEngine integration
+ * @brief Main program for Teensy 4.1 bionic hand firmware
+ * @version 2.0
  */
 
 #include <Arduino.h>
 #include <IntervalTimer.h>
+#include <EEPROM.h>
 #include "config.h"
-#include "EMGProcessor.h"
 #include "Finger.h"
+#include "EMGProcessor.h"
 #include "GraspManager.h"
-#include "CommandInterface.h"
-#include "SensorFusion.h"
 #include "ReflexEngine.h"
-#include "PowerMonitor.h"
+#include "SensorFusion.h"
+#include "CommandInterface.h"
 #include "Calibration.h"
+#include "PowerMonitor.h"
 
-// Global component instances
+// Pin definitions (if not in config.h)
+#ifndef LED_PIN
+#define LED_PIN 13
+#endif
+
+// Global system components
 EMGProcessor emgProcessor;
 
-// Create finger instances
-Finger finger0(FINGER_PWM_PINS[0], FSR_PINS[0]);
-Finger finger1(FINGER_PWM_PINS[1], FSR_PINS[1]);
-Finger finger2(FINGER_PWM_PINS[2], FSR_PINS[2]);
-Finger finger3(FINGER_PWM_PINS[3], FSR_PINS[3]);
+// Create 4 finger instances
+Finger finger0(FINGER_PWM_PINS[0], FINGER_FSR_PINS[0]);
+Finger finger1(FINGER_PWM_PINS[1], FINGER_FSR_PINS[1]);
+Finger finger2(FINGER_PWM_PINS[2], FINGER_FSR_PINS[2]);
+Finger finger3(FINGER_PWM_PINS[3], FINGER_FSR_PINS[3]);
 
-// Create finger pointer array for ReflexEngine
+// Finger array for other components
 Finger* fingers[NUM_FINGERS] = {&finger0, &finger1, &finger2, &finger3};
 
+// System components
 GraspManager graspManager;
-SensorFusion sensorFusion;
-CommandInterface cmdInterface;
 ReflexEngine reflexEngine;
-PowerMonitor powerMonitor(BATTERY_VOLTAGE_PIN);
+SensorFusion sensorFusion;
+CommandInterface commandInterface;
 Calibration calibration;
+PowerMonitor powerMonitor(BATTERY_VOLTAGE_PIN);
 
-// Timers
+// Timer interrupts
 IntervalTimer emgTimer;
 IntervalTimer reflexTimer;
 
-// Forward declarations
+// Timing variables
+uint32_t lastUpdateTime = 0;
+uint32_t lastHeartbeatTime = 0;
+bool ledState = false;
+
+// Function prototypes
 void emgSampleISR();
 void reflexUpdateISR();
 float readFSR(uint8_t index);
 
 void setup() {
     // Initialize serial
-    Serial.begin(SERIAL_BAUD);
-    delay(100); // Brief delay for stability
-    Serial.println(F("Bionic Hand Firmware v2.0"));
+    Serial.begin(115200);
+    delay(300); // Brief delay for stability
     
-    // Initialize components
-    emgProcessor.begin();
+    // Initialize LED pin
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, HIGH); // Turn on during initialization
+    
+    Serial.println(F("Bionic Hand Firmware v2.0"));
+    Serial.println(F("Initializing system..."));
     
     // Initialize fingers
     for (uint8_t i = 0; i < NUM_FINGERS; i++) {
         fingers[i]->begin();
     }
     
+    // Initialize EMG processor
+    emgProcessor.begin();
+    
     // Initialize grasp manager
     graspManager.begin(fingers, NUM_FINGERS);
+    
+    // Initialize reflex engine
+    reflexEngine.begin(fingers, NUM_FINGERS);
+    reflexEngine.setFSRReadFunction(readFSR);
+    reflexEngine.setSlipThreshold(REFLEX_SLIP_THRESHOLD);
     
     // Initialize sensor fusion
     sensorFusion.begin();
     
-    // Initialize power monitoring
+    // Initialize power monitor
     powerMonitor.begin();
     
-    // Initialize calibration and load settings
-    calibration.begin(&emgProcessor, fingers);
-    calibration.loadFromEEPROM();
-    
-    // Initialize ReflexEngine
-    reflexEngine.begin(fingers, NUM_FINGERS);
-    reflexEngine.setFSRReadFunction(readFSR);
-    reflexEngine.setSlipThreshold(FSR_SLIP_DFDT_THRESH);
+    // Initialize calibration
+    calibration.begin(&emgProcessor, fingers, NUM_FINGERS);
+    if (!calibration.loadFromEEPROM()) {
+        calibration.resetToDefaults();
+        calibration.saveToEEPROM();
+    }
     
     // Initialize command interface
-    cmdInterface.begin(&emgProcessor, fingers, NUM_FINGERS, &graspManager, 
-                     &reflexEngine, &sensorFusion, &powerMonitor, &calibration);
+    commandInterface.begin(&emgProcessor, &graspManager, &reflexEngine, 
+                          &sensorFusion, &powerMonitor, &calibration);
     
-    // Start timers
-    emgTimer.begin(emgSampleISR, 1000000 / EMG_SAMPLE_HZ); // EMG sampling timer
-    reflexTimer.begin(reflexUpdateISR, 1000); // 1000 us = 1 kHz reflex update rate
+    // Start timer interrupts
+    emgTimer.begin(emgSampleISR, 1000000 / EMG_SAMPLE_HZ); // EMG sampling
+    reflexTimer.begin(reflexUpdateISR, 1000); // 1kHz reflex update
     
-    Serial.println(F("System initialization complete"));
+    // Initial grasp - open
+    graspManager.executeGrasp("open");
+    
+    Serial.println(F("System initialized"));
+    digitalWrite(LED_PIN, LOW);
 }
 
 void loop() {
+    // Current time
+    uint32_t currentTime = millis();
+    
+    // Calculate time delta
+    float dt = (currentTime - lastUpdateTime) / 1000.0f; // seconds
+    lastUpdateTime = currentTime;
+    
     // Update EMG processing
     emgProcessor.update();
     
     // Get EMG feature vector
-    float emgFeatures[NUM_EMG_CHANNELS];
-    emgProcessor.getFeatureVector(emgFeatures);
+    float emgVector[NUM_EMG_CHANNELS];
+    emgProcessor.getFeatureVector(emgVector);
     
     // Get FSR values for sensor fusion
     float fsrValues[NUM_FINGERS];
@@ -101,68 +134,63 @@ void loop() {
     }
     
     // Update sensor fusion
-    sensorFusion.setEMGFeatures(emgFeatures, NUM_EMG_CHANNELS);
+    sensorFusion.setEMGValues(emgVector, NUM_EMG_CHANNELS);
     sensorFusion.setFSRValues(fsrValues, NUM_FINGERS);
     sensorFusion.update();
     
     // Update grasp manager with grip force from sensor fusion
-    graspManager.update(emgFeatures, sensorFusion.getGripForceMultiplier());
+    float forceMultiplier = sensorFusion.getForceMultiplier();
+    graspManager.update(dt);
+    graspManager.setGraspForce(forceMultiplier);
     
-    // Update finger control
-    static uint32_t lastFingerUpdate = 0;
-    uint32_t now = millis();
-    if (now - lastFingerUpdate >= 10) { // 10ms = 100Hz update rate
-        float dt = (now - lastFingerUpdate) / 1000.0f;
-        
-        // Update each finger
-        for (uint8_t i = 0; i < NUM_FINGERS; i++) {
-            fingers[i]->update(dt);
-        }
-        
-        lastFingerUpdate = now;
+    // Update fingers
+    for (uint8_t i = 0; i < NUM_FINGERS; i++) {
+        fingers[i]->update(dt);
     }
     
-    // Update power monitoring
-    static uint32_t lastPowerUpdate = 0;
-    if (now - lastPowerUpdate >= 1000) { // 1 second update
+    // Update power monitor (1Hz)
+    static uint32_t lastPowerCheck = 0;
+    if (currentTime - lastPowerCheck >= 1000) {
         powerMonitor.update();
         
         // Check for low power condition
         if (powerMonitor.getPowerState() == PowerState::CRITICAL) {
-            // Implement power-saving measures
             reflexEngine.setLowPowerMode(true);
+            graspManager.setGraspForce(0.7f); // Reduce grip force in low power
+            
+            Serial.println(F("WARNING: Battery critically low!"));
         } else {
             reflexEngine.setLowPowerMode(false);
         }
         
-        lastPowerUpdate = now;
+        lastPowerCheck = currentTime;
     }
     
     // Process serial commands
-    cmdInterface.update();
+    commandInterface.update();
+    
+    // Heartbeat LED - 1Hz blink
+    if (currentTime - lastHeartbeatTime >= 1000) {
+        ledState = !ledState;
+        digitalWrite(LED_PIN, ledState);
+        lastHeartbeatTime = currentTime;
+    }
 }
 
 void emgSampleISR() {
+    // Called at EMG_SAMPLE_HZ frequency
     emgProcessor.sampleISR();
 }
 
 void reflexUpdateISR() {
+    // Called at 1kHz for reflex system
     reflexEngine.update();
 }
 
-/**
- * @brief Read FSR value for the ReflexEngine
- * @param index Finger index (0-3)
- * @return Normalized FSR value (0.0-1.0)
- */
 float readFSR(uint8_t index) {
-    if (index >= NUM_FINGERS) {
-        return 0.0f;
-    }
+    // Validate index
+    if (index >= NUM_FINGERS) return 0.0f;
     
-    // Read from appropriate analog pin
-    int rawValue = analogRead(FSR_PINS[index]);
-    
-    // Normalize to 0.0-1.0 range
-    return rawValue / 1023.0f;
+    // Read FSR value directly from finger object
+    return fingers[index]->getFSR();
 }

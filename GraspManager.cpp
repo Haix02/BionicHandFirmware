@@ -1,6 +1,6 @@
 /**
  * @file GraspManager.cpp
- * @brief Coordinates multi-finger grasp patterns
+ * @brief Multi-finger grasp pattern coordination
  * @version 2.0
  */
 
@@ -10,10 +10,8 @@ GraspManager::GraspManager()
     : _fingers(nullptr),
       _numFingers(0),
       _currentGraspMode("open"),
-      _graspForce(1.0f),
-      _transitionSpeed(1.0f)
+      _graspForce(1.0f)
 {
-    // Constructor implementation
 }
 
 void GraspManager::begin(Finger** fingers, uint8_t numFingers) {
@@ -21,19 +19,21 @@ void GraspManager::begin(Finger** fingers, uint8_t numFingers) {
     _numFingers = numFingers;
 }
 
-void GraspManager::update() {
-    // This method can be called in the main loop
-    // Add any continuous grasp adjustments here
-    
-    // Example: Maintain current grasp mode
-    // This could be expanded to react to sensor input
+void GraspManager::update(float dt) {
+    // Continuous updates if needed
+    // This could adapt grasp based on sensor input
+    // Currently empty as grasps are event-driven
 }
 
 void GraspManager::executeGrasp(String mode) {
-    // Normalize mode string
+    // Convert to lowercase for case-insensitive comparison
     mode.toLowerCase();
     _currentGraspMode = mode;
     
+    Serial.print(F("Executing grasp: "));
+    Serial.println(mode);
+    
+    // Execute appropriate grasp pattern
     if (mode == "open") {
         executeOpenHand();
     }
@@ -41,248 +41,205 @@ void GraspManager::executeGrasp(String mode) {
         executeCloseHand();
     }
     else if (mode == "power") {
-        executePowerGrasp();
+        executePowerGrip();
     }
     else if (mode == "precision") {
-        executePrecisionGrasp();
+        executePrecisionGrip();
     }
     else if (mode == "spherical") {
-        executeSphericalGrasp();
+        executeSphericalGrip();
     }
     else if (mode == "tripod") {
-        executeTripodGrasp();
+        executeTripodGrip();
     }
     else if (mode == "lateral") {
-        executeLateralGrasp();
+        executeLateralGrip();
     }
     else if (mode == "hook") {
-        executeHookGrasp();
+        executeHookGrip();
     }
     else if (mode == "point") {
-        executePointGesture();
-    }
-    else if (mode == "thumbs_up") {
-        executeThumbsUpGesture();
+        executePointingGesture();
     }
     else {
-        // Unknown grasp mode - default to open
+        // Unknown grip type - default to open
+        Serial.println(F("Unknown grasp type, defaulting to open"));
         executeOpenHand();
     }
-    
-    Serial.print(F("Executing grasp: "));
-    Serial.println(mode);
 }
 
 void GraspManager::executeOpenHand() {
-    if (!_fingers) return;
+    if (!_fingers || _numFingers == 0) return;
     
-    // Set all fingers to minimum position
+    // Set all fingers to minimum position (open)
     for (uint8_t i = 0; i < _numFingers; i++) {
         _fingers[i]->setTarget(FINGER_POS_MIN);
     }
 }
 
 void GraspManager::executeCloseHand() {
-    if (!_fingers) return;
+    if (!_fingers || _numFingers == 0) return;
     
-    // Scale max position by grip force
+    // Calculate force-scaled position
     uint16_t targetPos = FINGER_POS_MIN + 
                          (FINGER_POS_MAX - FINGER_POS_MIN) * _graspForce;
     
-    // Set all fingers to maximum position
+    // Set all fingers to closed position
     for (uint8_t i = 0; i < _numFingers; i++) {
         _fingers[i]->setTarget(targetPos);
     }
 }
 
-void GraspManager::executePowerGrasp() {
-    if (!_fingers || _numFingers < 4) return;
+void GraspManager::executePowerGrip() {
+    if (!_fingers || _numFingers == 0) return;
     
-    // Power grasp: all fingers curl around object
-    // Different positions for anatomically correct hand pose
+    // Power grip: strong full closure of all fingers
+    // Thumb position (typically opposed to fingers)
+    uint16_t thumbPos = FINGER_POS_MIN + 
+                       (FINGER_POS_MAX - FINGER_POS_MIN) * 0.9f * _graspForce;
     
-    // Scale positions by grip force
-    uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
+    // Other fingers - fully closed
+    uint16_t fingerPos = FINGER_POS_MIN + 
+                        (FINGER_POS_MAX - FINGER_POS_MIN) * _graspForce;
     
-    // Thumb position (typically 90% flexion in power grasp)
-    uint16_t thumbPos = FINGER_POS_MIN + range * 0.9f * _graspForce;
+    // Apply positions
+    // Assuming finger 0 is thumb
+    if (_numFingers > 0) _fingers[0]->setTarget(thumbPos);
     
-    // Other fingers progressively more flexed
-    uint16_t indexPos = FINGER_POS_MIN + range * 0.85f * _graspForce;
-    uint16_t middlePos = FINGER_POS_MIN + range * 0.95f * _graspForce;
-    uint16_t ringPos = FINGER_POS_MIN + range * 0.95f * _graspForce;
-    
-    // Set finger positions
-    _fingers[0]->setTarget(thumbPos);    // Thumb
-    _fingers[1]->setTarget(indexPos);    // Index
-    _fingers[2]->setTarget(middlePos);   // Middle
-    _fingers[3]->setTarget(ringPos);     // Ring/pinky
-}
-
-void GraspManager::executePrecisionGrasp() {
-    if (!_fingers || _numFingers < 3) return;
-    
-    // Precision grasp: thumb and index finger form pincer
-    // Other fingers curl out of the way
-    
-    uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
-    
-    // Thumb and index at ~60% flexion
-    uint16_t thumbPos = FINGER_POS_MIN + range * 0.6f * _graspForce;
-    uint16_t indexPos = FINGER_POS_MIN + range * 0.6f * _graspForce;
-    
-    // Other fingers curl out of the way
-    uint16_t middlePos = FINGER_POS_MIN + range * 0.9f * _graspForce;
-    uint16_t ringPos = FINGER_POS_MIN + range * 0.95f * _graspForce;
-    
-    // Set finger positions
-    _fingers[0]->setTarget(thumbPos);    // Thumb
-    _fingers[1]->setTarget(indexPos);    // Index
-    _fingers[2]->setTarget(middlePos);   // Middle
-    if (_numFingers > 3) {
-        _fingers[3]->setTarget(ringPos);     // Ring/pinky
+    // Remaining fingers
+    for (uint8_t i = 1; i < _numFingers; i++) {
+        _fingers[i]->setTarget(fingerPos);
     }
 }
 
-void GraspManager::executeSphericalGrasp() {
-    if (!_fingers || _numFingers < 4) return;
-    
-    // Spherical grasp: fingers form hemisphere around object
-    // Each finger at a different flexion angle
-    
-    uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
-    
-    // Different flex angles for spherical grasp
-    uint16_t thumbPos = FINGER_POS_MIN + range * 0.7f * _graspForce;
-    uint16_t indexPos = FINGER_POS_MIN + range * 0.6f * _graspForce;
-    uint16_t middlePos = FINGER_POS_MIN + range * 0.7f * _graspForce;
-    uint16_t ringPos = FINGER_POS_MIN + range * 0.8f * _graspForce;
-    
-    // Set finger positions
-    _fingers[0]->setTarget(thumbPos);    // Thumb
-    _fingers[1]->setTarget(indexPos);    // Index
-    _fingers[2]->setTarget(middlePos);   // Middle
-    _fingers[3]->setTarget(ringPos);     // Ring/pinky
-}
-
-void GraspManager::executeTripodGrasp() {
-    if (!_fingers || _numFingers < 3) return;
-    
-    // Tripod grasp: thumb, index, middle form three-point contact
-    // Ring/pinky curl out of the way
-    
-    uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
-    
-    // Thumb, index and middle at medium flexion
-    uint16_t thumbPos = FINGER_POS_MIN + range * 0.65f * _graspForce;
-    uint16_t indexPos = FINGER_POS_MIN + range * 0.65f * _graspForce;
-    uint16_t middlePos = FINGER_POS_MIN + range * 0.65f * _graspForce;
-    uint16_t ringPos = FINGER_POS_MIN + range * 0.9f * _graspForce;
-    
-    // Set finger positions
-    _fingers[0]->setTarget(thumbPos);    // Thumb
-    _fingers[1]->setTarget(indexPos);    // Index
-    _fingers[2]->setTarget(middlePos);   // Middle
-    if (_numFingers > 3) {
-        _fingers[3]->setTarget(ringPos);     // Ring/pinky
-    }
-}
-
-void GraspManager::executeLateralGrasp() {
+void GraspManager::executePrecisionGrip() {
     if (!_fingers || _numFingers < 2) return;
     
-    // Lateral/key grip: thumb presses against side of index
-    // Other fingers curl to different positions
-    
+    // Precision grip: thumb and index finger only
     uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
     
-    // Thumb at medium-high flexion
+    // Thumb and index finger at ~70% closure
+    uint16_t thumbIndexPos = FINGER_POS_MIN + range * 0.7f * _graspForce;
+    
+    // Other fingers curled out of the way
+    uint16_t otherFingerPos = FINGER_POS_MIN + range * 0.9f * _graspForce;
+    
+    // Apply positions
+    // Assuming finger 0 is thumb, finger 1 is index
+    _fingers[0]->setTarget(thumbIndexPos);  // Thumb
+    _fingers[1]->setTarget(thumbIndexPos);  // Index
+    
+    // Curl remaining fingers
+    for (uint8_t i = 2; i < _numFingers; i++) {
+        _fingers[i]->setTarget(otherFingerPos);
+    }
+}
+
+void GraspManager::executeSphericalGrip() {
+    if (!_fingers || _numFingers == 0) return;
+    
+    // Spherical grip: curved hand shape for holding round objects
+    uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
+    
+    // Target positions for spherical grip - ~60% closed
+    uint16_t midPos = FINGER_POS_MIN + range * 0.6f * _graspForce;
+    
+    // Set all fingers to mid position
+    for (uint8_t i = 0; i < _numFingers; i++) {
+        _fingers[i]->setTarget(midPos);
+    }
+}
+
+void GraspManager::executeTripodGrip() {
+    if (!_fingers || _numFingers < 3) return;
+    
+    // Tripod grip: thumb, index, middle form three-point contact
+    uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
+    
+    // Tripod fingers at ~70% closure
+    uint16_t tripodPos = FINGER_POS_MIN + range * 0.7f * _graspForce;
+    
+    // Other fingers curled out of the way
+    uint16_t otherFingerPos = FINGER_POS_MIN + range * 0.9f * _graspForce;
+    
+    // Apply positions
+    // Assuming finger 0 is thumb, 1 is index, 2 is middle
+    _fingers[0]->setTarget(tripodPos);  // Thumb
+    _fingers[1]->setTarget(tripodPos);  // Index
+    _fingers[2]->setTarget(tripodPos);  // Middle
+    
+    // Curl remaining fingers
+    for (uint8_t i = 3; i < _numFingers; i++) {
+        _fingers[i]->setTarget(otherFingerPos);
+    }
+}
+
+void GraspManager::executeLateralGrip() {
+    if (!_fingers || _numFingers < 2) return;
+    
+    // Lateral grip (key grip): thumb presses against side of index
+    uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
+    
+    // Thumb at medium-high position
     uint16_t thumbPos = FINGER_POS_MIN + range * 0.7f * _graspForce;
     
-    // Index only partially flexed
+    // Index at medium position
     uint16_t indexPos = FINGER_POS_MIN + range * 0.5f * _graspForce;
     
-    // Other fingers out of the way
-    uint16_t middlePos = FINGER_POS_MIN + range * 0.7f * _graspForce;
-    uint16_t ringPos = FINGER_POS_MIN + range * 0.8f * _graspForce;
+    // Other fingers curled
+    uint16_t otherFingerPos = FINGER_POS_MIN + range * 0.85f * _graspForce;
     
-    // Set finger positions
-    _fingers[0]->setTarget(thumbPos);    // Thumb
-    _fingers[1]->setTarget(indexPos);    // Index
-    if (_numFingers > 2) {
-        _fingers[2]->setTarget(middlePos);   // Middle
-    }
-    if (_numFingers > 3) {
-        _fingers[3]->setTarget(ringPos);     // Ring/pinky
+    // Apply positions
+    _fingers[0]->setTarget(thumbPos);  // Thumb
+    _fingers[1]->setTarget(indexPos);  // Index
+    
+    // Curl remaining fingers
+    for (uint8_t i = 2; i < _numFingers; i++) {
+        _fingers[i]->setTarget(otherFingerPos);
     }
 }
 
-void GraspManager::executeHookGrasp() {
-    if (!_fingers || _numFingers < 4) return;
+void GraspManager::executeHookGrip() {
+    if (!_fingers || _numFingers == 0) return;
     
-    // Hook grasp: fingers curl like a hook, thumb stays open
-    
+    // Hook grip: fingers curled, thumb relaxed
     uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
     
-    // Thumb stays relatively open
+    // Thumb stays open
     uint16_t thumbPos = FINGER_POS_MIN + range * 0.2f * _graspForce;
     
-    // Other fingers curl strongly
-    uint16_t indexPos = FINGER_POS_MIN + range * 0.9f * _graspForce;
-    uint16_t middlePos = FINGER_POS_MIN + range * 0.95f * _graspForce;
-    uint16_t ringPos = FINGER_POS_MIN + range * 0.95f * _graspForce;
+    // Other fingers fully curled
+    uint16_t fingerPos = FINGER_POS_MIN + range * 0.95f * _graspForce;
     
-    // Set finger positions
-    _fingers[0]->setTarget(thumbPos);    // Thumb
-    _fingers[1]->setTarget(indexPos);    // Index
-    _fingers[2]->setTarget(middlePos);   // Middle
-    _fingers[3]->setTarget(ringPos);     // Ring/pinky
+    // Apply positions
+    if (_numFingers > 0) _fingers[0]->setTarget(thumbPos);  // Thumb
+    
+    // Curl other fingers
+    for (uint8_t i = 1; i < _numFingers; i++) {
+        _fingers[i]->setTarget(fingerPos);
+    }
 }
 
-void GraspManager::executePointGesture() {
-    if (!_fingers || _numFingers < 4) return;
+void GraspManager::executePointingGesture() {
+    if (!_fingers || _numFingers < 2) return;
     
-    // Point gesture: index extended, other fingers curled
-    
+    // Pointing gesture: index extended, others curled
     uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
-    
-    // Thumb partially flexed
-    uint16_t thumbPos = FINGER_POS_MIN + range * 0.7f * _graspForce;
     
     // Index extended
     uint16_t indexPos = FINGER_POS_MIN;
     
-    // Other fingers fully curled
-    uint16_t middlePos = FINGER_POS_MIN + range * 0.95f * _graspForce;
-    uint16_t ringPos = FINGER_POS_MIN + range * 0.95f * _graspForce;
-    
-    // Set finger positions
-    _fingers[0]->setTarget(thumbPos);    // Thumb
-    _fingers[1]->setTarget(indexPos);    // Index
-    _fingers[2]->setTarget(middlePos);   // Middle
-    _fingers[3]->setTarget(ringPos);     // Ring/pinky
-}
-
-void GraspManager::executeThumbsUpGesture() {
-    if (!_fingers || _numFingers < 4) return;
-    
-    // Thumbs up gesture: thumb extended, other fingers curled
-    
-    uint16_t range = FINGER_POS_MAX - FINGER_POS_MIN;
-    
-    // Thumb extended
-    uint16_t thumbPos = FINGER_POS_MIN;
-    
     // Other fingers curled
-    uint16_t indexPos = FINGER_POS_MIN + range * 0.9f * _graspForce;
-    uint16_t middlePos = FINGER_POS_MIN + range * 0.95f * _graspForce;
-    uint16_t ringPos = FINGER_POS_MIN + range * 0.95f * _graspForce;
+    uint16_t otherFingerPos = FINGER_POS_MIN + range * 0.9f * _graspForce;
     
-    // Set finger positions
-    _fingers[0]->setTarget(thumbPos);    // Thumb
-    _fingers[1]->setTarget(indexPos);    // Index
-    _fingers[2]->setTarget(middlePos);   // Middle
-    _fingers[3]->setTarget(ringPos);     // Ring/pinky
+    // Apply positions
+    for (uint8_t i = 0; i < _numFingers; i++) {
+        if (i == 1) { // Index finger
+            _fingers[i]->setTarget(indexPos);
+        } else {
+            _fingers[i]->setTarget(otherFingerPos);
+        }
+    }
 }
 
 void GraspManager::setGraspForce(float force) {
@@ -299,8 +256,4 @@ float GraspManager::getGraspForce() const {
 
 String GraspManager::getCurrentGraspMode() const {
     return _currentGraspMode;
-}
-
-void GraspManager::setTransitionSpeed(float speed) {
-    _transitionSpeed = constrain(speed, 0.1f, 1.0f);
 }

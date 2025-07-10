@@ -1,6 +1,6 @@
 /**
  * @file Finger.h
- * @brief Enhanced finger actuator control with reflexive grip
+ * @brief Enhanced finger control with reflexive grip
  * @version 2.0
  */
 
@@ -10,9 +10,10 @@
 #include "config.h"
 
 // Reflex parameters
-#define REFLEX_BOOST_PERCENT 15     // Increase grip by 15% of remaining range
-#define REFLEX_MIN_BOOST 5          // Minimum boost amount
-#define REFLEX_DURATION_MS 400      // Duration of reflex grip (milliseconds)
+#define REFLEX_DURATION_MS 400      // Duration of reflex grip (ms)
+#define REFLEX_COOLDOWN_MS 300      // Minimum time between reflexes (ms)
+#define REFLEX_BOOST_PERCENT 15     // Boost grip by 15% of remaining range
+#define REFLEX_MIN_BOOST 10         // Minimum boost amount
 
 //#define DEBUG_REFLEX              // Uncomment for debug output
 
@@ -20,22 +21,58 @@ class Finger {
 public:
     Finger(uint8_t pwmPin, uint8_t fsrPin);
     
+    /**
+     * @brief Initialize pins and starting position
+     */
     void begin();
+    
+    /**
+     * @brief Update finger state (call periodically)
+     * @param dt Time delta in seconds
+     */
     void update(float dt);
     
-    // Position control methods
+    /**
+     * @brief Trigger reflexive grip response
+     * Temporarily increases grip force to prevent slip
+     */
+    void reflexGrip();
+    
+    /**
+     * @brief Set target position
+     * @param position Target position (0-180)
+     */
     void setTarget(uint16_t position);
+    
+    /**
+     * @brief Get current target position
+     * @return Target position
+     */
     uint16_t getTarget() const;
+    
+    /**
+     * @brief Get current actual position
+     * @return Current position
+     */
     uint16_t getCurrentPosition() const;
+    
+    /**
+     * @brief Set position offset for calibration
+     * @param offset Position offset
+     */
     void setOffset(int16_t offset);
     
-    // Sensory feedback methods
+    /**
+     * @brief Get current FSR value
+     * @return FSR value (0.0-1.0)
+     */
     float getFSR() const;
-    float getFsrDerivative() const;
     
-    // Reflex control
-    void reflexGrip();
-    bool isReflexActive() const;
+    /**
+     * @brief Get FSR derivative
+     * @return FSR derivative (dF/dt)
+     */
+    float getFsrDerivative() const;
 
 private:
     // Hardware pins
@@ -45,23 +82,20 @@ private:
     // Position control
     uint16_t _currentPosition;
     uint16_t _targetPosition;
-    uint16_t _minPosition;
-    uint16_t _maxPosition;
     int16_t _offset;
     
     // FSR feedback
     float _fsrValue;
-    float _lastFsrValue;
+    float _fsrLastValue;
     float _fsrDerivative;
     
     // Reflex state
     bool _reflexActive;
     uint32_t _reflexStartTime;
-    uint16_t _preReflexPosition;
-    uint16_t _reflexBoostAmount;
+    uint32_t _lastReflexTime;
+    uint16_t _preReflexTarget;
     
     // Private methods
-    void readFSR();
     void updatePosition(float dt);
     void writePosition(uint16_t position);
 };
