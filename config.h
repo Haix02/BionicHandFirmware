@@ -1,84 +1,92 @@
 /**
  * @file config.h
- * @brief Hardware pin assignments and system configuration constants for Teensy 4.1 Bionic Hand.
- * @author Ottobock/Open Bionics Firmware Team
- * @version 3.0
+ * @brief System configuration and pin definitions
+ * @version 2.0
+ * @author Haix02
+ * @date 2025-07-10
  */
 
 #pragma once
 
 #include <Arduino.h>
 
-// ----------------------------
-// ---- Pin Assignments -------
-// ----------------------------
+// ================================
+// SYSTEM CONFIGURATION
+// ================================
 
-constexpr uint8_t NUM_EMG_CHANNELS = 8;
-constexpr uint8_t NUM_FINGERS = 4;
-constexpr uint8_t NUM_FSR = NUM_FINGERS;
+#define NUM_FINGERS 4
+#define NUM_EMG_CHANNELS 8
 
-// Assign analog pins for EMG inputs
-constexpr uint8_t EMG_PINS[NUM_EMG_CHANNELS] = {A0, A1, A2, A3, A4, A5, A6, A7};
+// ================================
+// PIN DEFINITIONS
+// ================================
 
-// Assign analog pins for Finger FSR sensors
-constexpr uint8_t FSR_PINS[NUM_FSR] = {A8, A9, A10, A11};
+// Finger PWM control pins (servos/motors)
+const uint8_t FINGER_PWM_PINS[NUM_FINGERS] = {
+    2,  // Finger 0 (Thumb)
+    3,  // Finger 1 (Index)
+    4,  // Finger 2 (Middle)
+    5   // Finger 3 (Ring/Pinky)
+};
 
-// Optional IMU pins (I2C)
-constexpr uint8_t IMU_SDA_PIN = 18; // Default I2C pins for Teensy 4.1
-constexpr uint8_t IMU_SCL_PIN = 19;
+// Finger FSR sensor pins
+const uint8_t FINGER_FSR_PINS[NUM_FINGERS] = {
+    A0, // Finger 0 FSR
+    A1, // Finger 1 FSR
+    A2, // Finger 2 FSR
+    A3  // Finger 3 FSR
+};
 
-// Assign actuator PWM pins (Servo/Dynamixel/ESC. Adapt as required)
-constexpr uint8_t FINGER_PWM_PINS[NUM_FINGERS] = {2, 3, 4, 5};
+// EMG input pins
+const uint8_t EMG_PINS[NUM_EMG_CHANNELS] = {
+    A8,  // EMG Channel 0
+    A9,  // EMG Channel 1
+    A10, // EMG Channel 2
+    A11, // EMG Channel 3
+    A12, // EMG Channel 4
+    A13, // EMG Channel 5
+    A14, // EMG Channel 6
+    A15  // EMG Channel 7
+};
 
-// Optional: LED heartbeat
-constexpr uint8_t LED_PIN = 13;
+// ================================
+// FINGER POSITION LIMITS
+// ================================
 
-// ----------------------------
-// ---- Signal Processing -----
-// ----------------------------
+#define FINGER_POS_MIN 0    // Fully open (degrees)
+#define FINGER_POS_MAX 180  // Fully closed (degrees)
 
-// EMG Sampling
-constexpr float EMG_SAMPLE_HZ = 1000.0f;
-constexpr uint16_t EMG_MOVAVG_WINDOW_MS = 100;
-constexpr uint16_t EMG_MOVAVG_WINDOW = (uint16_t)((EMG_SAMPLE_HZ * EMG_MOVAVG_WINDOW_MS) / 1000.0f);
+// ================================
+// EMG PROCESSING PARAMETERS
+// ================================
 
-// FSR Sampling
-constexpr float FSR_SAMPLE_HZ = 100.0f;
+#define EMG_SAMPLE_HZ 2000          // EMG sampling frequency
+#define EMG_BUFFER_SIZE 200         // 100ms window at 2kHz
+#define EMG_FEATURES_PER_CHANNEL 4  // RMS, ZC, SSC, WL
+#define EMG_NORM_SCALE 2048.0f      // 12-bit ADC normalization
+#define EMG_ACTIVITY_THRESHOLD 0.05f // Activity detection threshold
 
-// Filtering - IIR Biquad Bandpass (20-500Hz)
-constexpr float EMG_BANDPASS_FC_LOW = 20.0f;
-constexpr float EMG_BANDPASS_FC_HIGH = 500.0f;
-constexpr float EMG_BANDPASS_Q = 0.707f;
+// Feature calculation thresholds
+#define EMG_ZC_THRESHOLD 15.0f      // Zero crossing threshold
+#define EMG_SSC_THRESHOLD 10.0f     // Slope sign change threshold
 
-// Normalization & Threshold
-constexpr float EMG_NORM_MAX = 1.0f; // Max normalized value
-constexpr float EMG_THRESH = 0.15f;  // Activation threshold (tune per subject)
+// ================================
+// REFLEX ENGINE PARAMETERS
+// ================================
 
-// FSR slip detection
-constexpr float FSR_SLIP_DFDT_THRESH = -0.2f; // Negative derivative threshold for slip (tune as needed)
-constexpr uint16_t FSR_DERIV_WINDOW = 4;      // Sample window (ms) for dF/dt
+#define REFLEX_SLIP_THRESHOLD -0.2f  // Slip detection threshold (negative)
+#define REFLEX_MIN_FORCE 0.05f       // Minimum force for slip detection
 
-// PID (example values, tune as needed)
-constexpr float FINGER_PID_KP = 2.0f;
-constexpr float FINGER_PID_KI = 0.01f;
-constexpr float FINGER_PID_KD = 0.1f;
+// ================================
+// COMMAND INTERFACE
+// ================================
 
-// Motion Profiles
-constexpr float MAX_VELOCITY_DEG_PER_SEC = 400.0f;
-constexpr float MAX_ACCELERATION_DEG_PER_SEC2 = 800.0f;
+#define CMD_BUFFER_SIZE 64           // Serial command buffer size
 
-// Reflex parameters
-constexpr float REFLEX_RESPONSE_TARGET_MS = 5.0f;  // Target response time in ms
+// ================================
+// TIMING PARAMETERS
+// ================================
 
-// ----------------------------
-// ---- Serial Interface ------
-// ----------------------------
-
-constexpr unsigned long SERIAL_BAUD = 115200;
-
-// ----------------------------
-// ---- Safety Limits ---------
-// ----------------------------
-
-constexpr uint16_t FINGER_POS_MIN = 0;   // PWM/Angle min
-constexpr uint16_t FINGER_POS_MAX = 180; // PWM/Angle max
+#define MAIN_LOOP_HZ 100            // Main loop frequency
+#define FINGER_UPDATE_HZ 100        // Finger update frequency
+#define GRASP_UPDATE_HZ 50          // Grasp manager update frequency

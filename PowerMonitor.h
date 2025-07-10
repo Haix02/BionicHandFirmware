@@ -1,115 +1,175 @@
 /**
  * @file PowerMonitor.h
- * @brief Battery voltage and current monitoring
+ * @brief System voltage and current monitoring for bionic hand
+ * @version 2.0
+ * @author Haix02
+ * @date 2025-07-10 23:14:49 UTC
  */
 
 #pragma once
 
 #include <Arduino.h>
+#include <Wire.h>
 #include "config.h"
 
-// Optional INA219 support
+// Optional INA219 support - uncomment if using INA219 current sensor
+// #define USE_INA219
+
 #ifdef USE_INA219
 #include <Adafruit_INA219.h>
 #endif
 
+// Power monitoring configuration
+#define POWER_VOLTAGE_PIN A10           // Analog pin for voltage measurement
+#define POWER_LOW_VOLTAGE_THRESHOLD 6.5f // Low voltage threshold (volts)
+#define POWER_CRITICAL_VOLTAGE_THRESHOLD 6.0f // Critical voltage threshold
+#define POWER_MAX_VOLTAGE 12.6f         // Maximum expected voltage (3S LiPo)
+#define POWER_MIN_VOLTAGE 9.0f          // Minimum safe voltage (3S LiPo)
+
+// Voltage divider configuration (adjust based on your hardware)
+#define VOLTAGE_DIVIDER_R1 10000.0f     // Upper resistor (10kΩ)
+#define VOLTAGE_DIVIDER_R2 3300.0f      // Lower resistor (3.3kΩ)
+#define VOLTAGE_DIVIDER_RATIO ((VOLTAGE_DIVIDER_R1 + VOLTAGE_DIVIDER_R2) / VOLTAGE_DIVIDER_R2)
+
+// Averaging configuration
+#define VOLTAGE_SAMPLE_COUNT 10         // Number of samples for averaging
+#define POWER_UPDATE_INTERVAL 100       // Update interval in milliseconds
+
 /**
  * @enum PowerState
- * @brief Power system state categories
+ * @brief Power system state enumeration
  */
 enum class PowerState {
-    NORMAL,     // Normal operating voltage
-    LOW,        // Low voltage, but still operational
-    CRITICAL,   // Critical voltage, implement power saving
-    EXTERNAL    // Running on external power
+    NORMAL,     // Normal operation voltage
+    LOW,        // Low voltage warning
+    CRITICAL,   // Critical voltage - implement power saving
+    EXTERNAL    // External power detected
 };
 
 class PowerMonitor {
 public:
-    /**
-     * @brief Constructor
-     * @param voltagePin Analog pin for voltage monitoring
-     */
-    PowerMonitor(uint8_t voltagePin = 0);
+    PowerMonitor();
     
     /**
-     * @brief Initialize power monitoring
+     * @brief Initialize power monitoring system
+     * @return True if initialization successful
      */
     bool begin();
     
     /**
-     * @brief Update power measurements
+     * @brief Update voltage and current readings (call periodically)
      */
     void update();
     
     /**
-     * @brief Get current battery voltage
-     * @return Voltage in volts
+     * @brief Get latest measured voltage
+     * @return Battery voltage in volts
      */
-    float getBatteryVoltage() const;
+    float getVoltage() const;
     
     /**
-     * @brief Get current current draw
-     * @return Current in milliamps
+     * @brief Check if system is in low power condition
+     * @return True if voltage below threshold
      */
-    float getCurrentDraw() const;
+    bool isLowPower() const;
     
     /**
-     * @brief Get power consumption
-     * @return Power in milliwatts
+     * @brief Check if system is in critical power condition
+     * @return True if voltage critically low
      */
-    float getPowerConsumption() const;
+    bool isCriticalPower() const;
     
     /**
-     * @brief Get remaining battery percentage
-     * @return Percentage from 0-100
-     */
-    uint8_t getBatteryPercentage() const;
-    
-    /**
-     * @brief Get power system state
-     * @return PowerState enumeration value
+     * @brief Get current power state
+     * @return PowerState enumeration
      */
     PowerState getPowerState() const;
     
     /**
-     * @brief Configure voltage thresholds
-     * @param critical Critical voltage threshold
-     * @param low Low voltage threshold
+     * @brief Get battery percentage estimate
+     * @return Estimated battery percentage (0-100)
      */
-    void setThresholds(float critical, float low);
+    uint8_t getBatteryPercentage() const;
+    
+    /**
+     * @brief Get current draw (if INA219 available)
+     * @return Current in milliamps
+     */
+    float getCurrent() const;
+    
+    /**
+     * @brief Get power consumption (if current measurement available)
+     * @return Power in milliwatts
+     */
+    float getPower() const;
+    
+    /**
+     * @brief Set custom voltage thresholds
+     * @param lowThreshold Low voltage threshold
+     * @param criticalThreshold Critical voltage threshold
+     */
+    void setVoltageThresholds(float lowThreshold, float criticalThreshold);
     
     /**
      * @brief Print power status to serial
      */
     void printStatus() const;
+    
+    /**
+     * @brief Get uptime since last power cycle
+     * @return Uptime in milliseconds
+     */
+    uint32_t getUptime() const;
+    
+    /**
+     * @brief Check if external power is connected
+     * @return True if external power detected
+     */
+    bool isExternalPowerConnected() const;
 
 private:
-    uint8_t _voltagePin;
-    float _batteryVoltage;
-    float _currentDraw;
-    float _powerConsumption;
-    uint8_t _batteryPercentage;
-    PowerState _powerState;
-    
-    // Voltage thresholds
-    float _criticalVoltage;  // Enter power saving at this voltage
-    float _lowVoltage;       // Warning threshold
-    
-    // Voltage divider ratio (depends on your hardware)
-    float _voltageDividerRatio;
-    
-    // For averaging
-    float _voltageHistory[10];
+    // Voltage measurement
+    float _voltage;
+    float _voltageFiltered;
+    float _voltageHistory[VOLTAGE_SAMPLE_COUNT];
     uint8_t _voltageHistoryIndex;
+    bool _voltageHistoryFull;
+    
+    // Current measurement (if available)
+    float _current;
+    float _power;
+    
+    // Power state
+    PowerState _powerState;
+    bool _lowPowerFlag;
+    bool _criticalPowerFlag;
+    
+    // Thresholds
+    float _lowVoltageThreshold;
+    float _criticalVoltageThreshold;
+    
+    // Timing
+    uint32_t _lastUpdateTime;
+    uint32_t _bootTime;
+    
+    // Hardware status
+    bool _initialized;
+    bool _hasINA219;
+    bool _hasExternalPower;
     
     #ifdef USE_INA219
     Adafruit_INA219 _ina219;
-    bool _hasINA219;
     #endif
     
-    uint32_t _lastUpdateTime;
+    // Private methods
+    void readVoltage();
+    void readCurrent();
+    void updatePowerState();
+    void updateVoltageHistory(float voltage);
+    float calculateFilteredVoltage();
+    uint8_t calculateBatteryPercentage(float voltage) const;
+    bool detectExternalPower();
     
-    // Calculate battery percentage based on voltage
-    uint8_t calculatePercentage(float voltage) const;
+    // Utility functions
+    float mapFloat(float x, float in_min, float in_max, float out_min, float out_max) const;
 };
