@@ -1,7 +1,6 @@
 /**
  * @file Calibration.h
- * @brief User calibration and personalization
- * @version 3.0
+ * @brief System calibration and EEPROM storage
  */
 
 #pragma once
@@ -9,38 +8,33 @@
 #include <Arduino.h>
 #include <EEPROM.h>
 #include "config.h"
-#include "Finger.h"
 #include "EMGProcessor.h"
+#include "Finger.h"
 
-// Structure to store calibration data in EEPROM
+// EEPROM storage structure
 struct CalibrationData {
-    uint16_t magic;            // Magic number to check data validity
+    uint16_t magicNumber;         // To verify valid data
     float emgThresholds[NUM_EMG_CHANNELS];
     float emgOffsets[NUM_EMG_CHANNELS];
     int16_t fingerOffsets[NUM_FINGERS];
-    float fsrScaling[NUM_FINGERS];
     float slipThreshold;
+    uint8_t checksum;             // Simple validation
 };
 
-/**
- * @class Calibration
- * @brief Manages calibration data and personalization
- * 
- * V3 Enhancements:
- * - Extended calibration parameters
- * - EEPROM storage with verification
- * - Automated calibration procedures
- */
 class Calibration {
 public:
+    Calibration();
+    
     /**
-     * @brief Initialize calibration system with component pointers
+     * @brief Initialize calibration module
+     * @param emgProcessor Pointer to EMG processor
+     * @param fingers Array of finger pointers
      */
-    Calibration(EMGProcessor* emgProcessor, Finger** fingers);
+    void begin(EMGProcessor* emgProcessor, Finger** fingers);
     
     /**
      * @brief Load calibration from EEPROM
-     * @return true if valid data was loaded
+     * @return True if valid data loaded
      */
     bool loadFromEEPROM();
     
@@ -50,17 +44,22 @@ public:
     void saveToEEPROM();
     
     /**
-     * @brief Restore default calibration settings
+     * @brief Reset to default calibration
      */
-    void restoreDefaults();
+    void resetToDefaults();
     
     /**
-     * @brief Set EMG threshold for specific channel
+     * @brief Calibrate EMG resting levels
+     */
+    void calibrateEMGRest();
+    
+    /**
+     * @brief Set EMG threshold for a channel
      */
     void setEMGThreshold(uint8_t channel, float threshold);
     
     /**
-     * @brief Set EMG offset for specific channel
+     * @brief Set EMG offset for a channel
      */
     void setEMGOffset(uint8_t channel, float offset);
     
@@ -70,24 +69,27 @@ public:
     void setFingerOffset(uint8_t finger, int16_t offset);
     
     /**
-     * @brief Set FSR scaling factor
-     */
-    void setFSRScaling(uint8_t finger, float scaling);
-    
-    /**
      * @brief Set slip detection threshold
      */
     void setSlipThreshold(float threshold);
     
     /**
-     * @brief Get current calibration data
+     * @brief Print current calibration values
      */
-    const CalibrationData& getData() const;
-    
+    void printCalibration();
+
 private:
     EMGProcessor* _emgProcessor;
     Finger** _fingers;
     
-    CalibrationData _data;
+    CalibrationData _calibData;
     
-    static constexpr uint16_t CALIBRATION_MAGIC = 0xC
+    // Magic number to identify valid calibration data
+    static const uint16_t MAGIC_NUMBER = 0xCAB1;
+    
+    // Calculate simple checksum for data validation
+    uint8_t calculateChecksum(const CalibrationData& data);
+    
+    // Apply calibration to components
+    void applyCalibration();
+};

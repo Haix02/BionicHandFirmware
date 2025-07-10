@@ -1,40 +1,31 @@
 /**
  * @file Finger.h
- * @brief Finger class definition with added reflex grip functionality
+ * @brief Enhanced finger control with reflex capabilities
  */
 
-#pragma once
+// Existing code
+// ...
 
-#include <Arduino.h>
+// Reflex parameters
+#define REFLEX_BOOST_PERCENT 15    // Boost grip by 15% of remaining range
+#define REFLEX_MIN_BOOST 5         // Minimum position boost
+#define REFLEX_DEBOUNCE_MS 300     // Minimum time between reflexes
+#define REFLEX_DURATION_MS 1000    // How long reflex boost remains active
 
 class Finger {
 public:
-  // Existing declarations (unchanged)
-  Finger(uint8_t servoPin, uint8_t fsrPin);
-  void begin();
-  void update();
-  void setTarget(uint16_t position);
-  uint16_t getTarget() const;
-  uint16_t getCurrentPosition() const;
-  float getFSR() const;
-  
-  /**
-   * @brief Trigger reflexive grip response to prevent slip
-   * @details Temporarily increases grip force/angle by a fixed amount
-   */
-  void reflexGrip();
-  
-  // Other existing methods (unchanged)
-  
+    // Existing declarations
+    // ...
+    
+    // Add reflexGrip method
+    void reflexGrip();
+    
 private:
-  // Existing members (unchanged)
-  uint8_t _servoPin;
-  uint8_t _fsrPin;
-  uint16_t _currentPosition;
-  uint16_t _targetPosition;
-  uint16_t _maxPosition;
-  bool _isMoving;
-  uint32_t _lastReflexTime; // New: track last reflex activation time
-  
-  // Other existing private members and methods (unchanged)
+    // Existing member variables
+    // ...
+    
+    // Add reflex-related members
+    uint32_t _lastReflexTime = 0;  // Time of last reflex activation
+    bool _reflexActive = false;    // Whether reflex is currently active
+    uint16_t _preReflexTarget = 0; // Target position before reflex
 };

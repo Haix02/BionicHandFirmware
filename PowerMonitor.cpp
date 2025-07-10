@@ -1,92 +1,105 @@
 /**
  * @file PowerMonitor.cpp
- * @brief Implementation of battery voltage and current monitoring
- * @version 1.0
+ * @brief Battery monitoring implementation
  */
 
 #include "PowerMonitor.h"
 
-PowerMonitor::PowerMonitor(uint8_t voltagePin)
+PowerMonitor::PowerMonitor(uint8_t voltagePin) 
     : _voltagePin(voltagePin),
       _batteryVoltage(0.0f),
       _currentDraw(0.0f),
       _powerConsumption(0.0f),
-      _powerState(PowerState::NORMAL),
       _batteryPercentage(100),
-      _criticalVoltage(6.4f),  // For 2S LiPo (3.2V per cell)
-      _lowVoltage(6.8f),       // For 2S LiPo (3.4V per cell)
-      _fullVoltage(8.4f),      // For 2S LiPo (4.2V per cell)
-      _voltageDividerRatio(2.0f),  // Default ratio
+      _powerState(PowerState::NORMAL),
+      _criticalVoltage(6.5f),  // For 2S LiPo (3.25V per cell)
+      _lowVoltage(7.0f),       // For 2S LiPo (3.5V per cell)
+      _voltageDividerRatio(2.0f), // Assuming voltage divider halves voltage
+      _voltageHistoryIndex(0),
       _lastUpdateTime(0)
 {
+    // Initialize voltage history
+    for (uint8_t i = 0; i < 10; i++) {
+        _voltageHistory[i] = 0.0f;
+    }
+    
     #ifdef USE_INA219
     _hasINA219 = false;
     #endif
 }
 
 bool PowerMonitor::begin() {
-    // Configure analog pin for voltage monitoring
     if (_voltagePin > 0) {
         pinMode(_voltagePin, INPUT);
     }
     
     #ifdef USE_INA219
-    // Initialize INA219 current sensor if available
+    // Try to initialize INA219 current/voltage sensor
     _hasINA219 = _ina219.begin();
-    
     if (_hasINA219) {
-        // Configure INA219
+        // Configure for 16V, 400mA range for higher precision
         _ina219.setCalibration_16V_400mA();
     }
     #endif
     
-    // Do initial update
+    // Initial measurement
     update();
     
     return true;
 }
 
 void PowerMonitor::update() {
-    // Limit update rate to once per 500ms
     uint32_t currentTime = millis();
+    
+    // Limit update rate to prevent excessive ADC usage
     if (currentTime - _lastUpdateTime < 500) {
         return;
     }
     _lastUpdateTime = currentTime;
     
-    // Read battery voltage
-    if (_voltagePin > 0) {
-        // Read from analog pin and apply voltage divider conversion
-        float raw = analogRead(_voltagePin);
-        _batteryVoltage = (raw / 1023.0f) * 3.3f * _voltageDividerRatio;
-    }
-    
     #ifdef USE_INA219
-    // Read current and power if INA219 is available
     if (_hasINA219) {
+        // Use INA219 for accurate measurements if available
+        _batteryVoltage = _ina219.getBusVoltage_V() + (_ina219.getShuntVoltage_mV() / 1000.0f);
         _currentDraw = _ina219.getCurrent_mA();
         _powerConsumption = _ina219.getPower_mW();
-        
-        // If we don't have a voltage pin, use INA219's voltage
-        if (_voltagePin == 0) {
-            _batteryVoltage = _ina219.getBusVoltage_V() + (_ina219.getShuntVoltage_mV() / 1000.0f);
-        }
-    }
+    } else 
     #endif
+    if (_voltagePin > 0) {
+        // Use analog pin for voltage measurement
+        int rawValue = analogRead(_voltagePin);
+        
+        // Convert to voltage, considering voltage divider
+        float measuredVoltage = (rawValue / 1023.0f) * 3.3f * _voltageDividerRatio;
+        
+        // Update rolling average
+        _voltageHistory[_voltageHistoryIndex] = measuredVoltage;
+        _voltageHistoryIndex = (_voltageHistoryIndex + 1) % 10;
+        
+        // Calculate average voltage to smooth readings
+        float sumVoltage = 0.0f;
+        for (uint8_t i = 0; i < 10; i++) {
+            sumVoltage += _voltageHistory[i];
+        }
+        _batteryVoltage = sumVoltage / 10.0f;
+        
+        // Estimate current based on voltage drop (if no INA219)
+        // This is a rough estimate and depends on your specific battery
+        _currentDraw = 0.0f; // Not implemented for analog reading
+        _powerConsumption = 0.0f;
+    }
     
-    // Determine power state based on voltage
+    // Calculate battery percentage
+    _batteryPercentage = calculatePercentage(_batteryVoltage);
+    
+    // Determine power state
     if (_batteryVoltage <= _criticalVoltage) {
         _powerState = PowerState::CRITICAL;
     } else if (_batteryVoltage <= _lowVoltage) {
         _powerState = PowerState::LOW;
-    } else if (_batteryVoltage >= _fullVoltage) {
-        _powerState = PowerState::FULL;
     } else {
         _powerState = PowerState::NORMAL;
     }
-    
-    // Calculate battery percentage
-    _batteryPercentage = calculateBatteryPercentage();
 }
 
 float PowerMonitor::getBatteryVoltage() const {
@@ -101,55 +114,57 @@ float PowerMonitor::getPowerConsumption() const {
     return _powerConsumption;
 }
 
-PowerState PowerMonitor::getPowerState() const {
-    return _powerState;
-}
-
 uint8_t PowerMonitor::getBatteryPercentage() const {
     return _batteryPercentage;
 }
 
-void PowerMonitor::setThresholds(float critical, float low, float full) {
+PowerState PowerMonitor::getPowerState() const {
+    return _powerState;
+}
+
+void PowerMonitor::setThresholds(float critical, float low) {
     _criticalVoltage = critical;
     _lowVoltage = low;
-    _fullVoltage = full;
 }
 
-void PowerMonitor::printStatus(Stream& stream) const {
-    stream.print(F("Battery: "));
-    stream.print(_batteryVoltage, 2);
-    stream.print(F("V ("));
-    stream.print(_batteryPercentage);
-    stream.print(F("%) | Current: "));
-    stream.print(_currentDraw, 1);
-    stream.print(F("mA | Power: "));
-    stream.print(_powerConsumption, 1);
-    stream.print(F("mW | State: "));
+void PowerMonitor::printStatus() const {
+    Serial.print(F("Battery: "));
+    Serial.print(_batteryVoltage, 2);
+    Serial.print(F("V ("));
+    Serial.print(_batteryPercentage);
+    Serial.print(F("%) | Current: "));
+    Serial.print(_currentDraw, 1);
+    Serial.print(F("mA | Power: "));
+    Serial.print(_powerConsumption, 1);
+    Serial.print(F("mW | State: "));
     
     switch (_powerState) {
-        case PowerState::CRITICAL:
-            stream.print(F("CRITICAL"));
+        case PowerState::NORMAL:
+            Serial.print(F("NORMAL"));
             break;
         case PowerState::LOW:
-            stream.print(F("LOW"));
+            Serial.print(F("LOW"));
             break;
-        case PowerState::NORMAL:
-            stream.print(F("NORMAL"));
+        case PowerState::CRITICAL:
+            Serial.print(F("CRITICAL"));
             break;
-        case PowerState::FULL:
-            stream.print(F("FULL"));
+        case PowerState::EXTERNAL:
+            Serial.print(F("EXTERNAL"));
             break;
     }
-    stream.println();
+    
+    Serial.println();
 }
 
-uint8_t PowerMonitor::calculateBatteryPercentage() const {
-    // Simple linear mapping from voltage to percentage
-    if (_batteryVoltage <= _criticalVoltage) return 0;
-    if (_batteryVoltage >= _fullVoltage) return 100;
+uint8_t PowerMonitor::calculatePercentage(float voltage) const {
+    // LiPo battery discharge curve is non-linear
+    // This is a simplified calculation
+    const float fullVoltage = 8.4f;  // 2S LiPo fully charged
+    const float emptyVoltage = 6.0f; // 2S LiPo empty
     
-    float range = _fullVoltage - _criticalVoltage;
-    float normalizedVoltage = _batteryVoltage - _criticalVoltage;
+    if (voltage >= fullVoltage) return 100;
+    if (voltage <= emptyVoltage) return 0;
     
-    return (uint8_t)(normalizedVoltage * 100.0f / range);
+    // Map voltage to percentage
+    return map(voltage * 100, emptyVoltage * 100, fullVoltage * 100, 0, 100);
 }

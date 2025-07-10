@@ -1,7 +1,6 @@
 /**
  * @file PowerMonitor.h
  * @brief Battery voltage and current monitoring
- * @version 1.0
  */
 
 #pragma once
@@ -9,114 +8,108 @@
 #include <Arduino.h>
 #include "config.h"
 
-// Include INA219 library if available
+// Optional INA219 support
 #ifdef USE_INA219
 #include <Adafruit_INA219.h>
 #endif
 
 /**
  * @enum PowerState
- * @brief Represents battery charge state
+ * @brief Power system state categories
  */
 enum class PowerState {
-    CRITICAL,   // Critically low, power-saving needed
-    LOW,        // Low but operational
-    NORMAL,     // Normal operation
-    FULL        // Fully charged
+    NORMAL,     // Normal operating voltage
+    LOW,        // Low voltage, but still operational
+    CRITICAL,   // Critical voltage, implement power saving
+    EXTERNAL    // Running on external power
 };
 
-/**
- * @class PowerMonitor
- * @brief Monitors battery voltage and current consumption
- * 
- * Provides power system monitoring with safety features for
- * low battery conditions.
- */
 class PowerMonitor {
 public:
+    /**
+     * @brief Constructor
+     * @param voltagePin Analog pin for voltage monitoring
+     */
     PowerMonitor(uint8_t voltagePin = 0);
     
     /**
-     * @brief Initialize the power monitor
-     * @return true if initialized successfully
+     * @brief Initialize power monitoring
      */
     bool begin();
     
     /**
-     * @brief Update power readings
-     * Call this periodically from the main loop
+     * @brief Update power measurements
      */
     void update();
     
     /**
-     * @brief Get battery voltage
-     * @return Battery voltage in volts
+     * @brief Get current battery voltage
+     * @return Voltage in volts
      */
     float getBatteryVoltage() const;
     
     /**
-     * @brief Get current draw
-     * @return Current in mA
+     * @brief Get current current draw
+     * @return Current in milliamps
      */
     float getCurrentDraw() const;
     
     /**
      * @brief Get power consumption
-     * @return Power in mW
+     * @return Power in milliwatts
      */
     float getPowerConsumption() const;
     
     /**
-     * @brief Get battery state
-     * @return PowerState enum value
-     */
-    PowerState getPowerState() const;
-    
-    /**
-     * @brief Get battery percentage
-     * @return Estimated battery percentage (0-100)
+     * @brief Get remaining battery percentage
+     * @return Percentage from 0-100
      */
     uint8_t getBatteryPercentage() const;
     
     /**
-     * @brief Set voltage thresholds
-     * @param critical Voltage for critical state
-     * @param low Voltage for low state
-     * @param full Voltage for full state
+     * @brief Get power system state
+     * @return PowerState enumeration value
      */
-    void setThresholds(float critical, float low, float full);
+    PowerState getPowerState() const;
     
     /**
-     * @brief Print power system status
-     * @param stream Stream to print to (e.g., Serial)
+     * @brief Configure voltage thresholds
+     * @param critical Critical voltage threshold
+     * @param low Low voltage threshold
      */
-    void printStatus(Stream& stream) const;
+    void setThresholds(float critical, float low);
     
+    /**
+     * @brief Print power status to serial
+     */
+    void printStatus() const;
+
 private:
     uint8_t _voltagePin;
     float _batteryVoltage;
     float _currentDraw;
     float _powerConsumption;
-    PowerState _powerState;
     uint8_t _batteryPercentage;
+    PowerState _powerState;
     
-    // Thresholds
-    float _criticalVoltage;
-    float _lowVoltage;
-    float _fullVoltage;
+    // Voltage thresholds
+    float _criticalVoltage;  // Enter power saving at this voltage
+    float _lowVoltage;       // Warning threshold
     
-    // INA219 current sensor (if available)
+    // Voltage divider ratio (depends on your hardware)
+    float _voltageDividerRatio;
+    
+    // For averaging
+    float _voltageHistory[10];
+    uint8_t _voltageHistoryIndex;
+    
     #ifdef USE_INA219
     Adafruit_INA219 _ina219;
     bool _hasINA219;
     #endif
     
-    // Voltage divider parameters
-    float _voltageDividerRatio;
-    
-    // Last update time
     uint32_t _lastUpdateTime;
     
     // Calculate battery percentage based on voltage
-    uint8_t calculateBatteryPercentage() const;
+    uint8_t calculatePercentage(float voltage) const;
 };

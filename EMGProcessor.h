@@ -1,25 +1,24 @@
 /**
  * @file EMGProcessor.h
- * @brief Enhanced EMG signal processing with advanced DSP features
- * @version 2.0
+ * @brief Enhanced EMG signal processing with real-time DSP features
  */
 
 #pragma once
 
 #include <Arduino.h>
 #include "config.h"
-
-// Add CMSIS DSP library for optimized signal processing
 #include <arm_math.h>
+
+#define FEATURE_VECTOR_SIZE 3 // RMS, ZC, SSC
 
 class EMGProcessor {
 public:
     EMGProcessor();
     
-    // Original public interface (maintained for compatibility)
+    // Original public interface
     void begin();
     void sampleISR();   // Called from IntervalTimer
-    void process();     // Call in main loop to process DSP pipeline
+    void update();      // Call in main loop
     
     float getFeature(uint8_t ch) const;
     void getFeatureVector(float *out) const;
@@ -28,31 +27,30 @@ public:
     void calibrateRest();
     
     // New enhanced methods
+    void getExtendedFeatures(uint8_t ch, float* features, uint8_t numFeatures) const;
     bool isActivityDetected(uint8_t ch) const;
+    float getRMS(uint8_t ch) const;
     float getZeroCrossings(uint8_t ch) const;
     float getSlopeSignChanges(uint8_t ch) const;
-    float getRMS(uint8_t ch) const;
-    void setActivityThreshold(float threshold);
 
 private:
     struct EMGChannelState {
-        float raw;             // Most recent raw sample
-        float filtered;        // After bandpass filter
-        float rectified;       // After rectification
-        float movavg_sum;      // For moving average
-        float movavg_buf[EMG_MOVAVG_WINDOW];
-        uint16_t movavg_idx;
-        float rms;             // RMS over window
-        float offset;          // Resting offset (for normalization)
-        float norm;            // Normalized, thresholded output
-        
-        // Enhanced features
-        float zero_crossings;  // ZC feature
-        float slope_sign_changes; // SSC feature
-        bool activity_detected;// Activity state
+        float raw;          // Most recent raw sample
+        float filtered;     // Filtered sample
+        float rectified;    // Rectified sample
+        float movavg_sum;   // For moving average calculation
+        float movavg_buf[EMG_MOVAVG_WINDOW];  // Moving average buffer
+        uint16_t movavg_idx;     // Current index in movavg buffer
         float raw_history[EMG_MOVAVG_WINDOW]; // Raw signal history
+        float offset;       // Baseline offset
+        float norm;         // Normalized output (0.0-1.0)
+        float rms;          // Root mean square
+        uint16_t zero_crossings;  // Zero crossing count
+        uint16_t slope_sign_changes; // Slope sign change count
+        bool activity_detected;  // Activity detection flag
+        float feature_vector[FEATURE_VECTOR_SIZE]; // Extended feature vector
     };
-
+    
     EMGChannelState channels[NUM_EMG_CHANNELS];
     
     // DSP components
@@ -60,16 +58,11 @@ private:
     float filterCoeffs[5*NUM_EMG_CHANNELS]; // 5 coefficients per filter
     float filterStates[4*NUM_EMG_CHANNELS]; // 4 state variables per filter
     
-    // Activity detection parameters
-    float _activityThreshold;
-    
-    // Enhanced processing methods
+    // Private methods
     void configureFilters();
-    void applyBandpass(uint8_t ch, float sample);
+    void applyDSP(uint8_t ch, float raw);
     void updateFeatures(uint8_t ch);
-    void detectActivity(uint8_t ch);
-    
-    // Original processing methods (enhanced internally)
     void updateMovingAverage(uint8_t ch, float val);
     void normalizeAndThreshold(uint8_t ch);
+    void detectActivity(uint8_t ch);
 };
